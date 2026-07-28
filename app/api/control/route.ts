@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 const supabaseUrl = () => process.env.SUPABASE_URL || "";
 const supabaseKey = () => process.env.SUPABASE_SECRET_KEY || "";
 const sender = { name: process.env.BREVO_SENDER_NAME || "Tanishka", email: process.env.BREVO_SENDER_EMAIL || "tanishka@iknowai.in" };
-const replyTo = () => process.env.BREVO_REPLY_TO_EMAIL || "sales@ikf.co.in";
+const replyTo = () => process.env.BREVO_REPLY_TO_EMAIL || "tanishka@iknowai.in";
 const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
 
 function actor(req: NextRequest) {

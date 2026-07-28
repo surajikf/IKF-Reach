@@ -376,7 +376,7 @@ export default function Home() {
                   <div className="form-actions full-field"><span>Creates a draft only. It cannot send automatically.</span><button className="primary-action" disabled={working}>{working ? "Creating…" : "Research & generate draft"}</button></div>
                 </form>
               </article>
-              <article className="panel control-card safety-card"><p className="eyebrow">Built-in guardrails</p><h2>Safe by default</h2><ul className="feature-list"><li>Manual approval required</li><li>Duplicate-contact protection</li><li>Personal name or Sir/Madam</li><li>Calibri 11 pt email format</li><li>Reply-To sales@ikf.co.in</li><li>Every action logged</li></ul></article>
+              <article className="panel control-card safety-card"><p className="eyebrow">Built-in guardrails</p><h2>Safe by default</h2><ul className="feature-list"><li>Manual approval required</li><li>Duplicate-contact protection</li><li>Personal name or Sir/Madam</li><li>Calibri 11 pt email format</li><li>Reply-To tanishka@iknowai.in</li><li>Every action logged</li></ul></article>
             </section>
           )}
 
@@ -405,7 +405,7 @@ export default function Home() {
               </article>
               <article className="panel control-card wide-card">
                 <div className="panel-heading"><div><p className="eyebrow">Sending identity</p><h2>Tanishka &lt;tanishka@iknowai.in&gt;</h2></div><StatusPill value="active" /></div>
-                <div className="identity-grid"><div><span>Reply-To</span><strong>{control?.replyTo || "sales@ikf.co.in"}</strong></div><div><span>Default mode</span><strong>Manual approval</strong></div><div><span>Timezone</span><strong>Asia/Kolkata</strong></div><div><span>Campaign state</span><strong>On hold</strong></div></div>
+                <div className="identity-grid"><div><span>Reply-To</span><strong>{control?.replyTo || "tanishka@iknowai.in"}</strong></div><div><span>Default mode</span><strong>Manual approval</strong></div><div><span>Timezone</span><strong>Asia/Kolkata</strong></div><div><span>Campaign state</span><strong>On hold</strong></div></div>
                 <form className="policy-row" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}><label>Daily limit<input name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /></label><label>Delay (minutes)<input name="delay" type="number" min="1" defaultValue={control?.settings?.minimum_delay_minutes || 5} /></label><label>Start<input name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /></label><label>End<input name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /></label><label className="confirm-box"><input name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span>Pause all</span></label><button className="primary-action">Save controls</button></form>
               </article>
             </section>
