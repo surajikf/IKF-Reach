@@ -167,6 +167,7 @@ function EmailTable({ rows, onOpen, compact = false, selected, onSelect }: { row
 
 export default function Home() {
   const [section, setSection] = useState<Section>("overview");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [emailStatus, setEmailStatus] = useState("all");
   const [emailCampaign, setEmailCampaign] = useState("all");
@@ -216,6 +217,26 @@ Please let me know a suitable time to connect.`,
   }
 
   useEffect(() => { loadControl(); }, []);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileMenuOpen(false);
+    };
+    const desktopQuery = window.matchMedia("(min-width: 761px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) setMobileMenuOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", closeOnEscape);
+    desktopQuery.addEventListener("change", closeOnDesktop);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+      desktopQuery.removeEventListener("change", closeOnDesktop);
+    };
+  }, [mobileMenuOpen]);
 
   async function runAction(payload: Record<string, any>, success: string) {
     setWorking(true);
@@ -373,6 +394,7 @@ Please let me know a suitable time to connect.`,
 
   function switchSection(next: Section) {
     setSection(next);
+    setMobileMenuOpen(false);
     setSearch("");
     setPage(1);
   }
@@ -544,15 +566,23 @@ Please let me know a suitable time to connect.`,
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-mark"><span>IKF</span><b>Outreach</b></div>
+        <div className="sidebar-brand-row">
+          <div className="brand-mark"><span>IKF</span><b>Outreach</b></div>
+          <button className={`mobile-menu-toggle ${mobileMenuOpen ? "open" : ""}`} type="button" aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen} aria-controls="dashboard-navigation" onClick={() => setMobileMenuOpen((open) => !open)}>
+            <span /><span /><span />
+          </button>
+        </div>
         <p className="brand-caption">AI email operations</p>
-        <nav aria-label="Dashboard sections">
+        <nav id="dashboard-navigation" className={mobileMenuOpen ? "mobile-open" : ""} aria-label="Dashboard sections">
+          <div className="mobile-menu-intro"><strong>IKF Outreach workspace</strong><span>Select a section to continue</span></div>
           {navItems.map((item) => (
-            <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => switchSection(item.id)}>
+            <button key={item.id} className={section === item.id ? "active" : ""} aria-current={section === item.id ? "page" : undefined} onClick={() => switchSection(item.id)}>
               <span aria-hidden="true">{item.icon}</span>{item.label}
             </button>
           ))}
+          <div className="mobile-menu-status"><span className="sync-dot" /><div><strong>Live database</strong><small>{refreshing ? "Refreshing…" : control?.refreshedAt ? `Updated ${new Date(control.refreshedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : "Connecting…"}</small></div></div>
         </nav>
+        {mobileMenuOpen && <button className="mobile-menu-backdrop" type="button" aria-label="Close navigation menu" onClick={() => setMobileMenuOpen(false)} />}
         <div className="sidebar-footer">
           <span className="sync-dot" />
           <div>
