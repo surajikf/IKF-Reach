@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import data from "./dashboard-data.json";
 
 type Section = "overview" | "create" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
-type EmailRecord = (typeof data.emails)[number];
-type ControlData = { ok: boolean; providers?: { database: boolean; brevo: boolean }; queue?: Array<Record<string, any>>; jobs?: Array<Record<string, any>>; settings?: Record<string, any>; campaigns?: Array<Record<string, any>>; sender?: { name: string; email: string }; replyTo?: string; error?: string };
+type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
+type ControlData = { ok: boolean; canManage?: boolean; operator?: string | null; providers?: { database: boolean; brevo: boolean }; queue?: Array<Record<string, any>>; jobs?: Array<Record<string, any>>; settings?: Record<string, any>; campaigns?: Array<Record<string, any>>; liveEmails?: EmailRecord[]; sender?: { name: string; email: string }; replyTo?: string; scheduling?: { provider: string; timezone: string; maximumHoursAhead: number }; error?: string };
 
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
@@ -98,12 +98,15 @@ function Metric({ label, value, note, tone }: { label: string; value: number; no
   );
 }
 
-function EmailTable({ rows, onOpen, compact = false }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean }) {
+function EmailTable({ rows, onOpen, compact = false, selected, onSelect }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean; selected?: Set<string>; onSelect?: (id: string, checked: boolean) => void }) {
+  const selectable = Boolean(selected && onSelect);
+  const allSelected = selectable && rows.length > 0 && rows.every((email) => selected!.has(email.id));
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
+            {selectable && <th className="check-column"><input type="checkbox" checked={allSelected} onChange={(event) => rows.forEach((email) => onSelect!(email.id, event.target.checked))} aria-label="Select all emails on this page" /></th>}
             <th>Company & recipient</th>
             <th>Subject</th>
             <th>Status</th>
@@ -113,7 +116,8 @@ function EmailTable({ rows, onOpen, compact = false }: { rows: EmailRecord[]; on
         </thead>
         <tbody>
           {rows.map((email) => (
-            <tr key={email.id} onClick={() => onOpen(email)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onOpen(email)}>
+            <tr key={email.id} className={selected?.has(email.id) ? "selected-row" : ""} onClick={() => onOpen(email)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onOpen(email)}>
+              {selectable && <td className="check-column" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selected!.has(email.id)} onChange={(event) => onSelect!(email.id, event.target.checked)} aria-label={`Select ${email.subject}`} /></td>}
               <td>
                 <strong>{shortName(email.company)}</strong>
                 <span>{email.recipient}</span>
@@ -140,6 +144,9 @@ export default function Home() {
   const [control, setControl] = useState<ControlData | null>(null);
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkMode, setBulkMode] = useState<"schedule" | "send" | null>(null);
+  const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "" });
   const [draftForm, setDraftForm] = useState({ email: "", name: "", company: "", website: "", brief: "" });
   const [queueForm, setQueueForm] = useState({ emailId: data.emails[0]?.id || "", scheduledFor: "", confirmed: false });
   const pageSize = 20;
@@ -172,9 +179,10 @@ export default function Home() {
     }
   }
 
+  const displayEmails = useMemo<EmailRecord[]>(() => control?.liveEmails?.length ? control.liveEmails : data.emails as EmailRecord[], [control?.liveEmails]);
   const filteredEmails = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return data.emails.filter((email) => {
+    return displayEmails.filter((email) => {
       const matchesTerm = !term || `${email.company} ${email.recipient} ${email.subject} ${email.campaign}`.toLowerCase().includes(term);
       const status = email.sendStatus || email.status;
       const matchesStatus = emailStatus === "all" ||
@@ -183,7 +191,7 @@ export default function Home() {
         status === emailStatus;
       return matchesTerm && matchesStatus;
     });
-  }, [search, emailStatus]);
+  }, [displayEmails, search, emailStatus]);
 
   const pagedEmails = filteredEmails.slice((page - 1) * pageSize, page * pageSize);
   const pages = Math.max(1, Math.ceil(filteredEmails.length / pageSize));
@@ -193,6 +201,37 @@ export default function Home() {
     setSection(next);
     setSearch("");
     setPage(1);
+  }
+
+  function toggleSelected(id: string, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      checked ? next.add(id) : next.delete(id);
+      return next;
+    });
+  }
+
+  async function runBulkSchedule() {
+    const result = await runAction({
+      action: "schedule_batch",
+      emailIds: [...selectedIds],
+      scheduledFor: new Date(bulkForm.scheduledFor).toISOString(),
+      delayMinutes: bulkForm.delayMinutes,
+      confirm: bulkForm.confirmed,
+    }, `${selectedIds.size} emails were securely scheduled with Brevo.`);
+    if (result?.ok) {
+      setSelectedIds(new Set());
+      setBulkMode(null);
+      setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "" });
+    }
+  }
+
+  async function runBulkSend() {
+    const result = await runAction({ action: "send_batch", emailIds: [...selectedIds], confirmText: bulkForm.confirmText }, `${selectedIds.size} emails were accepted by Brevo.`);
+    if (result?.ok) {
+      setSelectedIds(new Set());
+      setBulkMode(null);
+    }
   }
 
   return (
@@ -229,6 +268,12 @@ export default function Home() {
         </header>
 
         <div className="content">
+          {control?.ok && !control.canManage && (
+            <section className="access-banner">
+              <div><strong>Public view · sending controls are locked</strong><p>Sign in with an authorized IKF account to approve, schedule, cancel, or send emails.</p></div>
+              <a href="/signin-with-chatgpt?return_to=%2F">Sign in to manage</a>
+            </section>
+          )}
           {section === "overview" && (
             <>
               <section className="credit-alert" aria-label="Sending status">
@@ -272,7 +317,7 @@ export default function Home() {
 
               <section className="panel recent-panel">
                 <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => switchSection("emails")}>View all {data.summary.emails} →</button></div>
-                <EmailTable rows={data.emails.slice(0, 7)} onOpen={setSelectedEmail} compact />
+                <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact />
               </section>
             </>
           )}
@@ -280,7 +325,7 @@ export default function Home() {
           {section === "emails" && (
             <section className="panel data-panel">
               <div className="panel-heading filters-heading">
-                <div><p className="eyebrow">Email library</p><h2>{filteredEmails.length} records</h2></div>
+                <div><p className="eyebrow">Email library</p><h2>{filteredEmails.length} generated emails</h2><p className="section-helper">Select emails, preview the content, then schedule or send only after confirmation.</p></div>
                 <select value={emailStatus} onChange={(event) => { setEmailStatus(event.target.value); setPage(1); }} aria-label="Filter by email status">
                   <option value="all">All statuses</option>
                   <option value="draft">Needs review</option>
@@ -288,7 +333,32 @@ export default function Home() {
                   <option value="sent">Sent</option>
                 </select>
               </div>
-              <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} />
+              <div className="selection-toolbar">
+                <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? "Ready for review or scheduling" : "Use the checkboxes to choose emails"}</span></div>
+                <div>
+                  <button disabled={!selectedIds.size || !control?.canManage || working} onClick={() => runAction({ action: "approve_batch", emailIds: [...selectedIds] }, `${selectedIds.size} emails approved. Nothing has been sent.`)}>Approve</button>
+                  <button className="primary-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("schedule")}>Schedule selected</button>
+                  <button className="send-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("send")}>Send selected now</button>
+                  {selectedIds.size > 0 && <button className="quiet-action" onClick={() => setSelectedIds(new Set())}>Clear</button>}
+                </div>
+              </div>
+              {bulkMode === "schedule" && (
+                <div className="bulk-panel">
+                  <div><p className="eyebrow">Automatic delivery</p><h3>Schedule {selectedIds.size} emails</h3><p>Brevo will hold and deliver these messages even after this dashboard is closed.</p></div>
+                  <label>First email time<input type="datetime-local" value={bulkForm.scheduledFor} onChange={(e) => setBulkForm({ ...bulkForm, scheduledFor: e.target.value })} /></label>
+                  <label>Spacing between emails<select value={bulkForm.delayMinutes} onChange={(e) => setBulkForm({ ...bulkForm, delayMinutes: Number(e.target.value) })}><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select></label>
+                  <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I reviewed the recipients and approve automatic delivery.</span></label>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="primary-action" disabled={!bulkForm.scheduledFor || !bulkForm.confirmed || working} onClick={runBulkSchedule}>{working ? "Scheduling…" : "Confirm schedule"}</button></div>
+                </div>
+              )}
+              {bulkMode === "send" && (
+                <div className="bulk-panel danger-panel">
+                  <div><p className="eyebrow">Immediate send</p><h3>Send {selectedIds.size} emails now</h3><p>This action cannot be undone. Type <strong>SEND</strong> to confirm.</p></div>
+                  <label>Confirmation<input value={bulkForm.confirmText} onChange={(e) => setBulkForm({ ...bulkForm, confirmText: e.target.value.toUpperCase() })} placeholder="Type SEND" /></label>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="danger-action" disabled={bulkForm.confirmText !== "SEND" || working} onClick={runBulkSend}>{working ? "Sending…" : "Send now"}</button></div>
+                </div>
+              )}
+              <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
               <div className="pagination"><span>Page {page} of {pages}</span><div><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div></div>
             </section>
           )}
@@ -315,14 +385,14 @@ export default function Home() {
               <article className="panel control-card wide-card">
                 <div className="panel-heading"><div><p className="eyebrow">Approval workflow</p><h2>Approve, schedule, or send</h2></div><span>{control?.queue?.length || 0} queued</span></div>
                 <div className="control-form compact-form">
-                  <label className="full-field">Choose generated email<select value={queueForm.emailId} onChange={(e) => setQueueForm({ ...queueForm, emailId: e.target.value })}>{data.emails.map((email) => <option key={email.id} value={email.id}>{email.company} — {email.recipient}</option>)}</select></label>
+                  <label className="full-field">Choose generated email<select value={queueForm.emailId} onChange={(e) => setQueueForm({ ...queueForm, emailId: e.target.value })}>{displayEmails.map((email) => <option key={email.id} value={email.id}>{email.company} — {email.recipient}</option>)}</select></label>
                   <label>Schedule date and time<input type="datetime-local" value={queueForm.scheduledFor} onChange={(e) => setQueueForm({ ...queueForm, scheduledFor: e.target.value })} /></label>
                   <div className="button-stack"><button disabled={working} onClick={() => runAction({ action: "approve", emailId: queueForm.emailId }, "Email approved. It has not been sent.")}>Approve draft</button><button disabled={working || !queueForm.scheduledFor} onClick={() => runAction({ action: "schedule", emailId: queueForm.emailId, scheduledFor: new Date(queueForm.scheduledFor).toISOString() }, "Email added to the scheduled queue.")}>Schedule</button></div>
                   <label className="confirm-box full-field"><input type="checkbox" checked={queueForm.confirmed} onChange={(e) => setQueueForm({ ...queueForm, confirmed: e.target.checked })} /><span>I confirm that I want to send this one email now.</span></label>
-                  <button className="danger-action full-field" disabled={working || !queueForm.confirmed} onClick={() => runAction({ action: "send_now", emailId: queueForm.emailId, confirm: true }, "Brevo accepted the email. The database has been updated.")}>Send this email now</button>
+                  <button className="danger-action full-field" disabled={working || !queueForm.confirmed || !control?.canManage} onClick={() => runAction({ action: "send_now", emailId: queueForm.emailId, confirm: true }, "Brevo accepted the email. The database has been updated.")}>Send this email now</button>
                 </div>
               </article>
-              <article className="panel control-card"><p className="eyebrow">Scheduled queue</p><h2>Upcoming sends</h2><div className="mini-list">{control?.queue?.length ? control.queue.slice(0, 8).map((item) => <div key={item.id}><strong>{String(item.status)}</strong><span>{item.scheduled_for ? compactDate(String(item.scheduled_for)) : "Awaiting time"}</span></div>) : <p className="muted-copy">No emails are scheduled.</p>}</div></article>
+              <article className="panel control-card"><p className="eyebrow">Scheduled queue</p><h2>Upcoming sends</h2><div className="mini-list">{control?.queue?.length ? control.queue.slice(0, 8).map((item) => <div key={item.id}><span><strong>{String(item.status)}</strong><small>{item.scheduled_for ? new Date(String(item.scheduled_for)).toLocaleString("en-IN") : "Awaiting time"}</small></span>{String(item.status).includes("scheduled") && <button disabled={!control?.canManage || working} onClick={() => runAction({ action: "cancel_scheduled", queueId: item.id }, "Scheduled email cancelled.")}>Cancel</button>}</div>) : <p className="muted-copy">No emails are scheduled.</p>}</div></article>
             </section>
           )}
 
