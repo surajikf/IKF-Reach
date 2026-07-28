@@ -52,34 +52,59 @@ type WebsiteResearch = {
   pagesReviewed: string[];
 };
 
-function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null }) {
+function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null; template?: string }) {
   const name = greetingName(input.email, input.name);
-  const topic = escapeHtml(input.topic?.trim() || "AI Native Thinking Masterclass");
-  const company = escapeHtml(input.company);
   const researchedContext = input.research?.summary || input.research?.description || "";
-  const context = escapeHtml(input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`);
-  const focusAreas = input.research?.focusAreas?.length ? input.research.focusAreas.slice(0, 3).map(escapeHtml).join(", ") : "productivity, knowledge workflows, and stakeholder engagement";
-  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5"><p>Dear ${escapeHtml(name)},</p><p>While reviewing <strong><u>${company}</u></strong>, I noted its focus on ${context}. This creates a relevant opportunity to apply <strong>${topic}</strong> thinking across ${focusAreas}.</p><p>We would be delighted to conduct a practical <strong>${topic}</strong> session tailored to your leadership and functional teams. The discussion can cover:</p><ul><li><strong>AI-enabled research</strong>, analysis, and reporting</li><li><strong>Workflow automation</strong> and operational productivity</li><li><strong>Sales and marketing</strong>, with stakeholder engagement</li><li><strong>Knowledge management</strong> and decision support</li><li><strong>Responsible AI</strong> adoption frameworks</li></ul><p>The objective is to identify immediate, measurable opportunities and build a structured roadmap aligned with <strong><u>${company}</u></strong>.</p><p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p><p>Please let me know a <strong>suitable time</strong> to connect.</p><p>Regards,<br><strong>Tanishka</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p></div>`;
+  const context = input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`;
+  const focusAreas = input.research?.focusAreas?.length ? input.research.focusAreas.slice(0, 3).join(", ") : "productivity, knowledge workflows, and stakeholder engagement";
+  const topic = input.topic?.trim() || "AI Native Thinking Masterclass";
+  const template = String(input.template || "").trim();
+  const usesPersonalization = /\{\{\s*(name|company|topic|research|focus_areas)\s*\}\}/i.test(template);
+  const defaultTemplate = `Dear {{name}},
+
+While reviewing {{company}}, I noted its focus on {{research}}. This creates a relevant opportunity to apply {{topic}} thinking across {{focus_areas}}.
+
+We would be delighted to conduct a practical {{topic}} session tailored to your leadership and functional teams.
+
+Please let me know a suitable time to connect.`;
+  const personalizedOpening = !usesPersonalization && template
+    ? `Dear {{name}},\n\nWhile reviewing {{company}}, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.\n\n`
+    : "";
+  let body = renderEmailTemplate(`${personalizedOpening}${template || defaultTemplate}`, { name, company: input.company, topic, research: context, focusAreas });
+  if (!/chat\.whatsapp\.com/i.test(body)) {
+    body += `<p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p>`;
+  }
+  if (!/I Knowledge Factory Pvt\. Ltd\./i.test(body)) {
+    body += `<p>Regards,<br><strong>Tanishka</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
+  }
+  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5">${body}</div>`;
 }
 
 export async function GET(req: NextRequest) {
   try {
-    const [queue, jobs, settings, campaigns, emails, contacts, companies] = await Promise.all([
+    const [queue, jobs, settings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
       db("outreach_queue?select=*&order=created_at.desc&limit=100"),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
       db("outreach_settings?select=*&key=eq.sending_policy"),
       db("campaigns?select=id,name,status,sender_name,sender_email&order=created_at.desc"),
       db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&order=generated_at.desc&limit=1000"),
-      db("contacts?select=id,email,full_name&limit=1000"),
-      db("companies?select=id,name&limit=1000"),
+      db("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc&limit=1000"),
+      db("companies?select=id,name,website,normalized_domain,industry,country,research_data,updated_at&order=updated_at.desc&limit=1000"),
+      db("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc&limit=1000"),
+      db("activity_log?select=id,company_id,contact_id,action,details,created_at&order=created_at.desc&limit=100"),
     ]);
     const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
     const companyById = new Map(companies.map((item: Record<string, any>) => [item.id, item]));
     const campaignById = new Map(campaigns.map((item: Record<string, any>) => [item.id, item]));
+    const latestSendByEmailId = new Map<string, Record<string, any>>();
+    for (const item of sends) {
+      if (item.generated_email_id && !latestSendByEmailId.has(item.generated_email_id)) latestSendByEmailId.set(item.generated_email_id, item);
+    }
     const liveEmails = emails.map((item: Record<string, any>) => {
       const contact = contactById.get(item.contact_id) || {};
       const company = companyById.get(item.company_id) || {};
       const campaign = campaignById.get(item.campaign_id) || {};
+      const latestSend = latestSendByEmailId.get(item.id);
       return {
         id: item.id,
         recipient: contact.email || "",
@@ -89,10 +114,63 @@ export async function GET(req: NextRequest) {
         subject: item.subject,
         html: item.html_body,
         status: item.status,
+        sendStatus: latestSend?.status || null,
         version: item.version,
         generatedAt: item.generated_at,
       };
     });
+    const contactCountByCompany = new Map<string, number>();
+    const draftCountByCompany = new Map<string, number>();
+    for (const contact of contacts) {
+      if (contact.company_id) contactCountByCompany.set(contact.company_id, (contactCountByCompany.get(contact.company_id) || 0) + 1);
+    }
+    for (const email of emails) {
+      if (email.company_id) draftCountByCompany.set(email.company_id, (draftCountByCompany.get(email.company_id) || 0) + 1);
+    }
+    const liveContacts = contacts.map((item: Record<string, any>) => {
+      const company = companyById.get(item.company_id) || {};
+      return {
+        id: item.id,
+        name: item.full_name || null,
+        email: item.email,
+        role: item.job_title || null,
+        confidence: item.data_confidence || item.source || "unverified",
+        company: company.name || "Unknown organization",
+        industry: company.industry || null,
+        createdAt: item.created_at,
+      };
+    });
+    const liveCompanies = companies.map((item: Record<string, any>) => ({
+      id: item.id,
+      name: item.name,
+      website: item.website || (item.normalized_domain ? `https://${item.normalized_domain}` : ""),
+      industry: item.industry || null,
+      country: item.country || null,
+      contacts: contactCountByCompany.get(item.id) || 0,
+      drafts: draftCountByCompany.get(item.id) || 0,
+      updatedAt: item.updated_at,
+    }));
+    const liveActivity = activityRows.map((item: Record<string, any>) => {
+      const company = companyById.get(item.company_id) || {};
+      const contact = contactById.get(item.contact_id) || {};
+      return {
+        id: item.id,
+        action: item.action,
+        company: company.name || item.details?.company || null,
+        email: contact.email || item.details?.email || item.details?.test_recipient || null,
+        createdAt: item.created_at,
+      };
+    });
+    const liveStats = {
+      companies: companies.length,
+      contacts: contacts.length,
+      emails: emails.length,
+      pendingReview: emails.filter((item: Record<string, any>) => item.status === "draft_pending_review").length,
+      approved: emails.filter((item: Record<string, any>) => item.status === "approved").length,
+      scheduled: emails.filter((item: Record<string, any>) => item.status === "scheduled").length,
+      sent: sends.filter((item: Record<string, any>) => item.status === "sent").length,
+      failed: sends.filter((item: Record<string, any>) => /fail|not_sent/i.test(String(item.status || ""))).length,
+    };
     let brevo = false;
     try {
       const check = await fetch("https://api.brevo.com/v3/account", { headers: { "api-key": process.env.BREVO_API_KEY || "" } });
@@ -108,8 +186,13 @@ export async function GET(req: NextRequest) {
       settings: settings[0]?.value || {},
       campaigns,
       liveEmails,
+      liveContacts,
+      liveCompanies,
+      liveActivity,
+      liveStats,
       sender,
       replyTo: replyTo(),
+      refreshedAt: new Date().toISOString(),
       scheduling: { provider: "Brevo", timezone: "Asia/Kolkata", maximumHoursAhead: 72 },
     });
   } catch (error) {
@@ -136,6 +219,8 @@ export async function POST(req: NextRequest) {
         website: body.website,
         brief: body.brief,
         topic: body.topic,
+        campaignName: body.campaignName,
+        emailTemplate: body.emailTemplate,
         source: "single_form",
       }, user);
       return NextResponse.json({ ok: true, draft: result.draft, research: result.research });
@@ -144,6 +229,11 @@ export async function POST(req: NextRequest) {
     if (body.action === "research_batch") {
       const topic = String(body.topic || "").trim();
       if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
+      const campaignName = cleanCampaignName(body.campaignName);
+      if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
+      const emailTemplate = String(body.emailTemplate || "").trim();
+      if (!emailTemplate) return NextResponse.json({ ok: false, error: "Paste the email template to personalize for this campaign." }, { status: 400 });
+      if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
       const documentText = body.document ? await extractDocumentText(body.document) : "";
       const rawInput = `${String(body.rawInput || "")}\n${documentText}`.trim();
       const parsedContacts = parseContactInput(rawInput);
@@ -174,6 +264,8 @@ export async function POST(req: NextRequest) {
           const result = await createDraftRecord({
             ...input,
             topic,
+            campaignName,
+            emailTemplate,
             brief: String(body.brief || ""),
             source: body.document?.name ? `document:${body.document.name}` : "pasted_list",
           }, user);
@@ -302,10 +394,16 @@ export async function POST(req: NextRequest) {
 
     if (body.action === "send_now") {
       if (body.confirm !== true) return NextResponse.json({ ok: false, error: "Explicit confirmation is required." }, { status: 400 });
+      const settingsRows = await db("outreach_settings?select=*&key=eq.sending_policy");
+      if (settingsRows[0]?.value?.paused) {
+        return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” first." }, { status: 409 });
+      }
       const mails = await db(`generated_emails?select=*&id=eq.${body.emailId}&limit=1`);
       const mail = mails[0];
+      if (!mail) return NextResponse.json({ ok: false, error: "Email draft not found." }, { status: 404 });
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
+      if (!contact?.email) return NextResponse.json({ ok: false, error: "The selected draft has no valid recipient." }, { status: 400 });
       const result = await submitBrevo(mail, contact);
       await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: sender.name, sender_email: sender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
       await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
@@ -424,6 +522,8 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   const researchData = {
     brief: String(input.brief || ""),
     topic: String(input.topic || "AI Native Thinking Masterclass"),
+    campaign_name: cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach",
+    template_provided: Boolean(String(input.emailTemplate || "").trim()),
     source: input.source || "dashboard",
     requested_by: user,
     researched_at: new Date().toISOString(),
@@ -453,13 +553,25 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     contacts = updated.length ? updated : contacts;
   }
   const contact = contacts[0];
-  let campaigns = await db("campaigns?select=*&name=eq.AI%20Leadership%20Masterclass%20Outreach&limit=1");
-  if (!campaigns.length) campaigns = await db("campaigns?select=*&order=created_at.desc&limit=1");
+  const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach";
+  let campaigns = await db(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
+  if (!campaigns.length) {
+    campaigns = await db("campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        id: crypto.randomUUID(),
+        name: campaignName,
+        status: "paused_user_hold",
+        sender_name: sender.name,
+        sender_email: sender.email,
+      }),
+    });
+  }
   const campaign = campaigns[0];
   if (!campaign) throw new Error("No outreach campaign is configured.");
   const existing = await db(`generated_emails?select=version&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
   const topic = String(input.topic || "AI Native Thinking Masterclass").trim();
-  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research });
+  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research, template: input.emailTemplate });
   const drafts = await db("generated_emails", {
     method: "POST",
     body: JSON.stringify({
@@ -475,6 +587,8 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
         greeting_source: input.name ? "user_provided" : "email_localpart_or_fallback",
         organization_name: companyName,
         topic,
+        campaign_name: campaignName,
+        template_provided: Boolean(String(input.emailTemplate || "").trim()),
         research_summary: research?.summary || "",
         focus_areas: research?.focusAreas || [],
         website,
@@ -488,7 +602,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
       },
     }),
   });
-  await db("research_jobs", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), email, company: companyName, website, brief: input.brief || null, status: "draft_created", created_by: user, result: { generated_email_id: drafts[0].id, research: researchData } }) });
+  await db("research_jobs", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), email, company: companyName, website, brief: input.brief || null, status: "draft_created", created_by: user, result: { generated_email_id: drafts[0].id, campaign_id: campaign.id, campaign_name: campaignName, research: researchData } }) });
   return { draft: drafts[0], company, contact, research };
 }
 
@@ -614,6 +728,43 @@ function parseContactInput(text: string) {
 function extractWebsites(text: string) {
   const matches = text.match(/(?:https?:\/\/|www\.)[^\s,;<>]+/gi) || [];
   return [...new Set(matches.map((item) => item.replace(/[).]+$/, "")).map((item) => item.startsWith("www.") ? `https://${item}` : item))];
+}
+
+function cleanCampaignName(value: unknown) {
+  return String(value || "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function renderEmailTemplate(template: string, values: { name: string; company: string; topic: string; research: string; focusAreas: string }) {
+  const tokenValues: Record<string, string> = {
+    name: escapeHtml(values.name),
+    company: `<strong><u>${escapeHtml(values.company)}</u></strong>`,
+    topic: `<strong>${escapeHtml(values.topic)}</strong>`,
+    research: escapeHtml(values.research),
+    focus_areas: escapeHtml(values.focusAreas),
+  };
+  const tokens: string[] = [];
+  const withTokens = template.replace(/\{\{\s*(name|company|topic|research|focus_areas)\s*\}\}/gi, (_, key: string) => {
+    const marker = `IKFPERSONALIZATIONTOKEN${tokens.length}END`;
+    tokens.push(tokenValues[key.toLowerCase()]);
+    return marker;
+  });
+  let safe = escapeHtml(withTokens);
+  tokens.forEach((value, index) => {
+    safe = safe.replace(`IKFPERSONALIZATIONTOKEN${index}END`, value);
+  });
+  safe = safe.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return safe
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => {
+      const lines = block.split(/\n/).map((line) => line.trim()).filter(Boolean);
+      if (lines.length && lines.every((line) => /^[-•*]\s+/.test(line))) {
+        return `<ul>${lines.map((line) => `<li>${line.replace(/^[-•*]\s+/, "")}</li>`).join("")}</ul>`;
+      }
+      return `<p>${lines.join("<br>")}</p>`;
+    })
+    .join("");
 }
 
 async function extractDocumentText(document: Record<string, any>) {

@@ -41,3 +41,4 @@ next-env.d.ts
 /outputs/
 /work/
 /.openai/*.tar.gz
+/.openai/dev-ui*.log

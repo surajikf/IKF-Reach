@@ -5,7 +5,30 @@ import data from "./dashboard-data.json";
 
 type Section = "overview" | "create" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
-type ControlData = { ok: boolean; canManage?: boolean; operator?: string | null; providers?: { database: boolean; brevo: boolean }; queue?: Array<Record<string, any>>; jobs?: Array<Record<string, any>>; settings?: Record<string, any>; campaigns?: Array<Record<string, any>>; liveEmails?: EmailRecord[]; sender?: { name: string; email: string }; replyTo?: string; scheduling?: { provider: string; timezone: string; maximumHoursAhead: number }; error?: string };
+type ContactRecord = { id: string; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; createdAt?: string | null };
+type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
+type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
+type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
+type ControlData = {
+  ok: boolean;
+  canManage?: boolean;
+  operator?: string | null;
+  providers?: { database: boolean; brevo: boolean };
+  queue?: Array<Record<string, any>>;
+  jobs?: Array<Record<string, any>>;
+  settings?: Record<string, any>;
+  campaigns?: Array<Record<string, any>>;
+  liveEmails?: EmailRecord[];
+  liveContacts?: ContactRecord[];
+  liveCompanies?: CompanyRecord[];
+  liveActivity?: ActivityRecord[];
+  liveStats?: LiveStats;
+  sender?: { name: string; email: string };
+  replyTo?: string;
+  refreshedAt?: string;
+  scheduling?: { provider: string; timezone: string; maximumHoursAhead: number };
+  error?: string;
+};
 
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
@@ -61,7 +84,7 @@ const genericMailboxWords = new Set([
   "service", "support", "team",
 ]);
 
-function contactDisplayName(contact: (typeof data.contacts)[number]) {
+function contactDisplayName(contact: ContactRecord) {
   if (contact.name?.trim() && contact.name.trim().toLowerCase() !== "sir/madam") return contact.name.trim();
 
   const parts = contact.email.split("@")[0].toLowerCase().split(/[._-]+/).filter(Boolean);
@@ -74,8 +97,8 @@ function contactDisplayName(contact: (typeof data.contacts)[number]) {
     : "Sir/Madam";
 }
 
-function personalizeGreeting(html: string, recipient: string) {
-  const contact = data.contacts.find((item) => item.email.toLowerCase() === recipient.toLowerCase());
+function personalizeGreeting(html: string, recipient: string, contacts: ContactRecord[]) {
+  const contact = contacts.find((item) => item.email.toLowerCase() === recipient.toLowerCase());
   if (!contact) return html;
   const name = contactDisplayName(contact);
   return name === "Sir/Madam" ? html : html.replace(/Dear\s+(?:Sir\/?Madam|Sir or Madam)/i, `Dear ${name}`);
@@ -139,26 +162,47 @@ export default function Home() {
   const [section, setSection] = useState<Section>("overview");
   const [search, setSearch] = useState("");
   const [emailStatus, setEmailStatus] = useState("all");
+  const [emailCampaign, setEmailCampaign] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
   const [control, setControl] = useState<ControlData | null>(null);
   const [working, setWorking] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
+  const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
+  const [listeningField, setListeningField] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMode, setBulkMode] = useState<"schedule" | "send" | "test" | null>(null);
   const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
-  const [intakeForm, setIntakeForm] = useState({ topic: "AI Native Thinking Masterclass", rawInput: "", websites: "", brief: "" });
+  const [intakeForm, setIntakeForm] = useState({
+    campaignName: "AI Native Thinking Masterclass Outreach",
+    topic: "AI Native Thinking Masterclass",
+    emailTemplate: `Dear {{name}},
+
+While reviewing {{company}}, I noted its focus on {{research}}. This creates a relevant opportunity to apply {{topic}} thinking across {{focus_areas}}.
+
+We would be delighted to conduct a practical {{topic}} session tailored to your leadership and functional teams.
+
+Please let me know a suitable time to connect.`,
+    rawInput: "",
+    websites: "",
+    brief: "",
+  });
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [queueForm, setQueueForm] = useState({ emailId: data.emails[0]?.id || "", scheduledFor: "", confirmed: false });
   const pageSize = 20;
 
   async function loadControl() {
+    setRefreshing(true);
     try {
       const response = await fetch("/api/control");
-      setControl(await response.json());
+      const result = await response.json();
+      setControl(result);
     } catch {
       setControl({ ok: false, error: "Unable to reach the control service." });
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -171,10 +215,12 @@ export default function Home() {
       const response = await fetch("/api/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || "Action could not be completed.");
+      setNoticeTone("success");
       setNotice(success);
       await loadControl();
       return result;
     } catch (error) {
+      setNoticeTone("error");
       setNotice(error instanceof Error ? error.message : "Action failed.");
     } finally {
       setWorking(false);
@@ -182,6 +228,27 @@ export default function Home() {
   }
 
   const displayEmails = useMemo<EmailRecord[]>(() => control?.liveEmails?.length ? control.liveEmails : data.emails as EmailRecord[], [control?.liveEmails]);
+  const displayContacts = useMemo<ContactRecord[]>(() => control?.liveContacts?.length ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
+  const displayCompanies = useMemo<CompanyRecord[]>(() => control?.liveCompanies?.length ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
+  const displayActivity = useMemo<ActivityRecord[]>(() => control?.liveActivity?.length ? control.liveActivity : data.activity as ActivityRecord[], [control?.liveActivity]);
+  const stats = useMemo<LiveStats>(() => control?.liveStats || {
+    companies: data.summary.companies,
+    contacts: data.summary.contacts,
+    emails: data.summary.emails,
+    pendingReview: data.summary.pendingReview,
+    approved: 0,
+    scheduled: 0,
+    sent: data.summary.sent,
+    failed: data.summary.failed,
+  }, [control?.liveStats]);
+  const paused = control?.settings?.paused ?? true;
+  const displayCampaigns = useMemo(() => control?.campaigns?.length ? control.campaigns.map((campaign) => ({
+    name: String(campaign.name || "Outreach"),
+    status: paused ? "paused_user_hold" : String(campaign.status || "active"),
+    drafts: displayEmails.filter((email) => email.campaign === campaign.name).length,
+    senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
+    senderEmail: String(campaign.sender_email || control.sender?.email || "tanishka@iknowai.in"),
+  })) : data.campaigns, [control?.campaigns, control?.sender, displayEmails, paused]);
   const filteredEmails = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayEmails.filter((email) => {
@@ -191,13 +258,33 @@ export default function Home() {
         (emailStatus === "draft" && status === "draft_pending_review") ||
         (emailStatus === "failed" && Boolean(status?.includes("fail") || status?.includes("not_sent"))) ||
         status === emailStatus;
-      return matchesTerm && matchesStatus;
+      const matchesCampaign = emailCampaign === "all" || email.campaign === emailCampaign;
+      return matchesTerm && matchesStatus && matchesCampaign;
     });
-  }, [displayEmails, search, emailStatus]);
+  }, [displayEmails, search, emailStatus, emailCampaign]);
 
   const pagedEmails = filteredEmails.slice((page - 1) * pageSize, page * pageSize);
   const pages = Math.max(1, Math.ceil(filteredEmails.length / pageSize));
   const pageTitle = navItems.find((item) => item.id === section)?.label || "Overview";
+
+  useEffect(() => {
+    if (page > pages) setPage(pages);
+  }, [page, pages]);
+
+  useEffect(() => {
+    if (displayEmails.length && !displayEmails.some((email) => email.id === queueForm.emailId)) {
+      setQueueForm((current) => ({ ...current, emailId: displayEmails[0].id }));
+    }
+  }, [displayEmails, queueForm.emailId]);
+
+  useEffect(() => {
+    if (!selectedEmail) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedEmail(null);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [selectedEmail]);
 
   function switchSection(next: Section) {
     setSection(next);
@@ -214,10 +301,16 @@ export default function Home() {
   }
 
   async function runBulkSchedule() {
+    const scheduleDate = new Date(bulkForm.scheduledFor);
+    if (!Number.isFinite(scheduleDate.getTime())) {
+      setNoticeTone("error");
+      setNotice("Choose a valid date and time before scheduling.");
+      return;
+    }
     const result = await runAction({
       action: "schedule_batch",
       emailIds: [...selectedIds],
-      scheduledFor: new Date(bulkForm.scheduledFor).toISOString(),
+      scheduledFor: scheduleDate.toISOString(),
       delayMinutes: bulkForm.delayMinutes,
       confirm: bulkForm.confirmed,
     }, `${selectedIds.size} emails were securely scheduled with Brevo.`);
@@ -237,10 +330,16 @@ export default function Home() {
   }
 
   async function runTestSend() {
+    const testRecipient = bulkForm.testRecipients.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testRecipient)) {
+      setNoticeTone("error");
+      setNotice("Enter one valid email address to receive the test copy.");
+      return;
+    }
     const result = await runAction({
       action: "send_test",
       emailIds: [...selectedIds],
-      testRecipients: bulkForm.testRecipients,
+      testRecipients: testRecipient,
       confirm: bulkForm.confirmed,
     }, `Test copies sent successfully. The original recipients and draft statuses were not changed.`);
     if (result?.ok) {
@@ -251,6 +350,16 @@ export default function Home() {
 
   async function runIntelligenceStudio() {
     let document: Record<string, string> | undefined;
+    if (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile) {
+      setNoticeTone("error");
+      setNotice("Add email addresses, company websites, or a contact document first.");
+      return;
+    }
+    if (!intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim()) {
+      setNoticeTone("error");
+      setNotice("Add a campaign name, email topic, and template before creating drafts.");
+      return;
+    }
     if (intakeFile) {
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -262,6 +371,55 @@ export default function Home() {
     }
     const result = await runAction({ action: "research_batch", ...intakeForm, document }, "Research completed and personalized drafts were created for review.");
     if (result?.ok) setIntakeResults(result.results || []);
+  }
+
+  function startDictation(field: string, currentValue: string, update: (value: string) => void) {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setNoticeTone("error");
+      setNotice("Voice typing is not supported in this browser. On Windows, click the field and press Windows + H.");
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.continuous = false;
+    recognition.onstart = () => setListeningField(field);
+    recognition.onend = () => setListeningField("");
+    recognition.onerror = () => {
+      setListeningField("");
+      setNoticeTone("error");
+      setNotice("Voice typing could not start. Check microphone permission or use Windows + H.");
+    };
+    recognition.onresult = (event: any) => {
+      const transcript = String(event.results?.[0]?.[0]?.transcript || "").trim();
+      if (transcript) update(`${currentValue}${currentValue.trim() ? " " : ""}${transcript}`);
+    };
+    recognition.start();
+  }
+
+  function VoiceButton({ field, value, onChange, label }: { field: string; value: string; onChange: (value: string) => void; label: string }) {
+    const active = listeningField === field;
+    return <button type="button" className={`voice-button ${active ? "listening" : ""}`} onClick={() => startDictation(field, value, onChange)} aria-label={`Dictate ${label}`} title={active ? "Listening…" : `Speak ${label}`}>{active ? "●" : "🎙"}</button>;
+  }
+
+  function handleFileSelection(file: File | null) {
+    if (!file) {
+      setIntakeFile(null);
+      return;
+    }
+    const extension = file.name.split(".").pop()?.toLowerCase() || "";
+    if (!["pdf", "docx", "csv", "tsv", "txt"].includes(extension)) {
+      setNoticeTone("error");
+      setNotice("Choose a PDF, DOCX, CSV, TSV, or TXT file.");
+      return;
+    }
+    if (file.size > 6 * 1024 * 1024) {
+      setNoticeTone("error");
+      setNotice("The selected document is larger than 6 MB.");
+      return;
+    }
+    setIntakeFile(file);
   }
 
   return (
@@ -278,7 +436,10 @@ export default function Home() {
         </nav>
         <div className="sidebar-footer">
           <span className="sync-dot" />
-          <div><strong>Database snapshot</strong><small>28 Jul 2026</small></div>
+          <div>
+            <strong>Live database</strong>
+            <small>{refreshing ? "Refreshing…" : control?.refreshedAt ? `Updated ${new Date(control.refreshedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : "Connecting…"}</small>
+          </div>
         </div>
       </aside>
 
@@ -293,11 +454,18 @@ export default function Home() {
               <span aria-hidden="true">⌕</span>
               <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search records" aria-label="Search records" />
             </label>
+            <button className="refresh-button" onClick={loadControl} disabled={refreshing} aria-label="Refresh live dashboard data">{refreshing ? "Refreshing…" : "Refresh"}</button>
             <div className="avatar" aria-label="Tanishka">T</div>
           </div>
         </header>
 
         <div className="content">
+          {!control && (
+            <section className="system-banner loading-banner" role="status"><span className="loading-spinner" /><div><strong>Loading live outreach data</strong><p>Connecting to Supabase and Brevo.</p></div></section>
+          )}
+          {control && !control.ok && (
+            <section className="system-banner error-banner" role="alert"><div><strong>Live data is temporarily unavailable</strong><p>{control.error || "Please try the connection again."}</p></div><button onClick={loadControl}>Retry</button></section>
+          )}
           {control?.ok && !control.canManage && (
             <section className="access-banner">
               <div><strong>Public view · sending controls are locked</strong><p>Sign in with an authorized IKF account to approve, schedule, cancel, or send emails.</p></div>
@@ -306,24 +474,24 @@ export default function Home() {
           )}
           {section === "overview" && (
             <>
-              <section className="credit-alert" aria-label="Sending status">
-                <span className="alert-icon">!</span>
-                <div><strong>Sending is on hold</strong><p>No email will be sent until Suraj gives explicit approval. Drafts use Tanishka &lt;tanishka@iknowai.in&gt; and the updated signature.</p></div>
-                <StatusPill value="paused_user_hold" />
+              <section className={`credit-alert ${paused ? "" : "active-alert"}`} aria-label="Sending status">
+                <span className="alert-icon">{paused ? "!" : "✓"}</span>
+                <div><strong>{paused ? "Sending is on hold" : "Sending controls are active"}</strong><p>{paused ? "No campaign email can be scheduled or sent until an authorized operator turns off Pause all." : "Manual approval and confirmation are still required before every campaign send."} Drafts use Tanishka &lt;tanishka@iknowai.in&gt;.</p></div>
+                <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </section>
 
               <section className="metric-grid" aria-label="Outreach totals">
-                <Metric label="Generated emails" value={data.summary.emails} note="Across 2 campaigns" tone="violet" />
-                <Metric label="Needs review" value={data.summary.pendingReview} note="Before bulk sending" tone="amber" />
-                <Metric label="Contacts" value={data.summary.contacts} note={`${data.summary.companies} companies`} tone="blue" />
-                <Metric label="Past send failures" value={data.summary.failed} note="Before plan activation" tone="red" />
+                <Metric label="Generated emails" value={stats.emails} note={`Across ${displayCampaigns.length} campaigns`} tone="violet" />
+                <Metric label="Needs review" value={stats.pendingReview} note="Before approval or scheduling" tone="amber" />
+                <Metric label="Contacts" value={stats.contacts} note={`${stats.companies} companies`} tone="blue" />
+                <Metric label="Successful sends" value={stats.sent} note={`${stats.failed} failed attempts recorded`} tone="green" />
               </section>
 
               <section className="overview-grid">
                 <article className="panel campaigns-panel">
-                  <div className="panel-heading"><div><p className="eyebrow">Campaign health</p><h2>Active workstreams</h2></div><span>{data.campaigns.length} campaigns</span></div>
+                  <div className="panel-heading"><div><p className="eyebrow">Campaign health</p><h2>Active workstreams</h2></div><span>{displayCampaigns.length} campaigns</span></div>
                   <div className="campaign-list">
-                    {data.campaigns.map((campaign) => (
+                    {displayCampaigns.map((campaign) => (
                       <div className="campaign-row" key={campaign.name}>
                         <div className="campaign-symbol">{campaign.name.slice(0, 2).toUpperCase()}</div>
                         <div className="campaign-copy"><strong>{campaign.name}</strong><span>{campaign.senderName} · {campaign.senderEmail}</span></div>
@@ -337,16 +505,17 @@ export default function Home() {
                 <article className="panel delivery-panel">
                   <div className="panel-heading"><div><p className="eyebrow">Delivery readiness</p><h2>Campaign funnel</h2></div></div>
                   <div className="funnel-list">
-                    <div><span>Imported contacts</span><strong>{data.summary.contacts}</strong><i style={{ width: "100%" }} /></div>
-                    <div><span>Generated drafts</span><strong>{data.summary.drafts}</strong><i style={{ width: `${Math.round(data.summary.drafts / data.summary.contacts * 100)}%` }} /></div>
-                    <div><span>Approved to send</span><strong>0</strong><i style={{ width: "1%" }} /></div>
-                    <div><span>Delivered</span><strong>0</strong><i style={{ width: "1%" }} /></div>
+                    <div><span>Imported contacts</span><strong>{stats.contacts}</strong><i style={{ width: "100%" }} /></div>
+                    <div><span>Generated emails</span><strong>{stats.emails}</strong><i style={{ width: `${Math.min(100, Math.round(stats.emails / Math.max(1, stats.contacts) * 100))}%` }} /></div>
+                    <div><span>Approved</span><strong>{stats.approved}</strong><i style={{ width: `${Math.max(1, Math.round(stats.approved / Math.max(1, stats.emails) * 100))}%` }} /></div>
+                    <div><span>Scheduled</span><strong>{stats.scheduled}</strong><i style={{ width: `${Math.max(1, Math.round(stats.scheduled / Math.max(1, stats.emails) * 100))}%` }} /></div>
+                    <div><span>Sent</span><strong>{stats.sent}</strong><i style={{ width: `${Math.max(1, Math.round(stats.sent / Math.max(1, stats.emails) * 100))}%` }} /></div>
                   </div>
                 </article>
               </section>
 
               <section className="panel recent-panel">
-                <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => switchSection("emails")}>View all {data.summary.emails} →</button></div>
+                <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => switchSection("emails")}>View all {stats.emails} →</button></div>
                 <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact />
               </section>
             </>
@@ -356,20 +525,26 @@ export default function Home() {
             <section className="panel data-panel">
               <div className="panel-heading filters-heading">
                 <div><p className="eyebrow">Email library</p><h2>{filteredEmails.length} generated emails</h2><p className="section-helper">Select emails, preview the content, then schedule or send only after confirmation.</p></div>
-                <select value={emailStatus} onChange={(event) => { setEmailStatus(event.target.value); setPage(1); }} aria-label="Filter by email status">
-                  <option value="all">All statuses</option>
-                  <option value="draft">Needs review</option>
-                  <option value="failed">Failed</option>
-                  <option value="sent">Sent</option>
-                </select>
+                <div className="email-filter-group">
+                  <label><span>Campaign</span><select value={emailCampaign} onChange={(event) => { setEmailCampaign(event.target.value); setSelectedIds(new Set()); setPage(1); }} aria-label="Filter by campaign">
+                    <option value="all">All campaigns</option>
+                    {displayCampaigns.map((campaign) => <option key={campaign.name} value={campaign.name}>{campaign.name}</option>)}
+                  </select></label>
+                  <label><span>Status</span><select value={emailStatus} onChange={(event) => { setEmailStatus(event.target.value); setPage(1); }} aria-label="Filter by email status">
+                    <option value="all">All statuses</option>
+                    <option value="draft">Needs review</option>
+                    <option value="failed">Failed</option>
+                    <option value="sent">Sent</option>
+                  </select></label>
+                </div>
               </div>
               <div className="selection-toolbar">
-                <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? "Ready for review or scheduling" : "Use the checkboxes to choose emails"}</span></div>
+                <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? paused ? "Review is available; sending and scheduling are paused" : "Ready for review, testing, or scheduling" : "Use the checkboxes to choose emails"}</span></div>
                 <div>
                   <button disabled={!selectedIds.size || !control?.canManage || working} onClick={() => runAction({ action: "approve_batch", emailIds: [...selectedIds] }, `${selectedIds.size} emails approved. Nothing has been sent.`)}>Approve</button>
-                  <button className="test-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("test")}>Send test copy</button>
-                  <button className="primary-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("schedule")}>Schedule selected</button>
-                  <button className="send-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("send")}>Send selected now</button>
+                  <button className="test-action" disabled={!selectedIds.size || selectedIds.size > 5 || !control?.canManage || working} onClick={() => setBulkMode("test")} title={selectedIds.size > 5 ? "Select up to 5 drafts for a test" : ""}>Send test copy</button>
+                  <button className="primary-action" disabled={!selectedIds.size || selectedIds.size > 50 || paused || !control?.canManage || working} onClick={() => setBulkMode("schedule")} title={paused ? "Turn off Pause all before scheduling" : selectedIds.size > 50 ? "Schedule up to 50 emails at a time" : ""}>Schedule selected</button>
+                  <button className="send-action" disabled={!selectedIds.size || selectedIds.size > 25 || paused || !control?.canManage || working} onClick={() => setBulkMode("send")} title={paused ? "Turn off Pause all before sending" : selectedIds.size > 25 ? "Send up to 25 emails at a time" : ""}>Send selected now</button>
                   {selectedIds.size > 0 && <button className="quiet-action" onClick={() => setSelectedIds(new Set())}>Clear</button>}
                 </div>
               </div>
@@ -379,22 +554,22 @@ export default function Home() {
                   <label>First email time<input type="datetime-local" value={bulkForm.scheduledFor} onChange={(e) => setBulkForm({ ...bulkForm, scheduledFor: e.target.value })} /></label>
                   <label>Spacing between emails<select value={bulkForm.delayMinutes} onChange={(e) => setBulkForm({ ...bulkForm, delayMinutes: Number(e.target.value) })}><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select></label>
                   <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I reviewed the recipients and approve automatic delivery.</span></label>
-                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="primary-action" disabled={!bulkForm.scheduledFor || !bulkForm.confirmed || working} onClick={runBulkSchedule}>{working ? "Scheduling…" : "Confirm schedule"}</button></div>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="primary-action" disabled={!bulkForm.scheduledFor || !bulkForm.confirmed || paused || working} onClick={runBulkSchedule}>{working ? "Scheduling…" : "Confirm schedule"}</button></div>
                 </div>
               )}
               {bulkMode === "send" && (
                 <div className="bulk-panel danger-panel">
                   <div><p className="eyebrow">Immediate send</p><h3>Send {selectedIds.size} emails now</h3><p>This action cannot be undone. Type <strong>SEND</strong> to confirm.</p></div>
                   <label>Confirmation<input value={bulkForm.confirmText} onChange={(e) => setBulkForm({ ...bulkForm, confirmText: e.target.value.toUpperCase() })} placeholder="Type SEND" /></label>
-                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="danger-action" disabled={bulkForm.confirmText !== "SEND" || working} onClick={runBulkSend}>{working ? "Sending…" : "Send now"}</button></div>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="danger-action" disabled={bulkForm.confirmText !== "SEND" || paused || working} onClick={runBulkSend}>{working ? "Sending…" : "Send now"}</button></div>
                 </div>
               )}
               {bulkMode === "test" && (
                 <div className="bulk-panel test-panel">
-                  <div><p className="eyebrow">Inbox preview</p><h3>Send {selectedIds.size} selected email{selectedIds.size === 1 ? "" : "s"} to yourself</h3><p>Each message is clearly marked as a test. Original recipients and draft statuses stay unchanged.</p></div>
-                  <label className="test-recipient-field">Your test email addresses<textarea rows={3} value={bulkForm.testRecipients} onChange={(e) => setBulkForm({ ...bulkForm, testRecipients: e.target.value })} placeholder={"suraj@ikf.co.in\ntanishka@iknowai.in"} /><small>Paste up to 5 addresses, separated by commas or new lines.</small></label>
-                  <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I confirm these are test inboxes and want to send preview copies.</span></label>
-                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!bulkForm.testRecipients.trim() || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test copies"}</button></div>
+                  <div><p className="eyebrow">Inbox preview</p><h3>Send {selectedIds.size} selected email{selectedIds.size === 1 ? "" : "s"} as a test</h3><p>The preview will be delivered only to the email address you enter. The original client will not receive anything and the draft status will remain unchanged.</p></div>
+                  <label className="test-recipient-field"><span>Send test to</span><input type="email" value={bulkForm.testRecipients} onChange={(e) => setBulkForm({ ...bulkForm, testRecipients: e.target.value })} placeholder="Enter your email address" autoComplete="email" /><small>Example: your.name@company.com</small></label>
+                  <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I confirm that this is my test inbox and want to receive the preview.</span></label>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
                 </div>
               )}
               <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
@@ -410,24 +585,28 @@ export default function Home() {
                   <div className="studio-steps"><span>1 · Add sources</span><span>2 · Research</span><span>3 · Review drafts</span></div>
                 </div>
                 <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio(); }}>
-                  <label className="topic-field"><span>What is this outreach about?</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI Native Thinking Masterclass for leadership teams" /><small>This topic is used in every subject line and personalized email.</small></label>
+                  <div className="campaign-setup-grid">
+                    <label className="topic-field"><span>Campaign name</span><div className="voice-field"><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><VoiceButton field="campaignName" value={intakeForm.campaignName} onChange={(campaignName) => setIntakeForm((current) => ({ ...current, campaignName }))} label="campaign name" /></div><small>Every draft from this set stays together under this campaign.</small></label>
+                    <label className="topic-field"><span>Email topic</span><div className="voice-field"><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI-enabled manufacturing operations" /><VoiceButton field="topic" value={intakeForm.topic} onChange={(topic) => setIntakeForm((current) => ({ ...current, topic }))} label="email topic" /></div><small>Used to build each personalized subject line.</small></label>
+                  </div>
+                  <label className="template-field"><span>Your email template</span><div className="voice-field voice-textarea"><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><VoiceButton field="emailTemplate" value={intakeForm.emailTemplate} onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))} label="email template" /></div><small>Personalization fields: <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. A researched opening is added automatically when your template does not use personalization fields.</small></label>
                   <div className="source-grid">
                     <label className="source-card">
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
-                      <textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
+                      <div className="voice-field voice-textarea"><textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} /><VoiceButton field="rawInput" value={intakeForm.rawInput} onChange={(rawInput) => setIntakeForm((current) => ({ ...current, rawInput }))} label="contact list" /></div>
                     </label>
                     <label className="source-card">
                       <span className="source-icon">www</span><strong>Add company websites</strong><small>We inspect public home, about, and contact pages.</small>
-                      <textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} />
+                      <div className="voice-field voice-textarea"><textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} /><VoiceButton field="websites" value={intakeForm.websites} onChange={(websites) => setIntakeForm((current) => ({ ...current, websites }))} label="company websites" /></div>
                     </label>
                     <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
                       <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB</small>
-                      <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => setIntakeFile(event.target.files?.[0] || null)} />
+                      <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
                       <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
                     </label>
                   </div>
-                  <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
-                  <div className="studio-actions"><div><strong>Draft-only workflow</strong><span>Nothing is approved, scheduled, or sent automatically.</span></div><button className="primary-action" disabled={working || !control?.canManage}>{working ? "Researching websites…" : "Research & create drafts"}</button></div>
+                  <label className="brief-field"><span>Optional context or instructions</span><div className="voice-field voice-textarea"><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /><VoiceButton field="brief" value={intakeForm.brief} onChange={(brief) => setIntakeForm((current) => ({ ...current, brief }))} label="campaign instructions" /></div></label>
+                  <div className="studio-actions"><div><strong>Campaign draft workflow</strong><span>Drafts stay grouped under “{intakeForm.campaignName || "Untitled campaign"}”. Nothing is approved, scheduled, or sent automatically.</span></div><button className="primary-action" disabled={working || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Researching websites…" : "Create campaign drafts"}</button></div>
                 </form>
               </article>
 
@@ -455,9 +634,9 @@ export default function Home() {
                 <div className="control-form compact-form">
                   <label className="full-field">Choose generated email<select value={queueForm.emailId} onChange={(e) => setQueueForm({ ...queueForm, emailId: e.target.value })}>{displayEmails.map((email) => <option key={email.id} value={email.id}>{email.company} — {email.recipient}</option>)}</select></label>
                   <label>Schedule date and time<input type="datetime-local" value={queueForm.scheduledFor} onChange={(e) => setQueueForm({ ...queueForm, scheduledFor: e.target.value })} /></label>
-                  <div className="button-stack"><button disabled={working} onClick={() => runAction({ action: "approve", emailId: queueForm.emailId }, "Email approved. It has not been sent.")}>Approve draft</button><button disabled={working || !queueForm.scheduledFor} onClick={() => runAction({ action: "schedule", emailId: queueForm.emailId, scheduledFor: new Date(queueForm.scheduledFor).toISOString() }, "Email added to the scheduled queue.")}>Schedule</button></div>
-                  <label className="confirm-box full-field"><input type="checkbox" checked={queueForm.confirmed} onChange={(e) => setQueueForm({ ...queueForm, confirmed: e.target.checked })} /><span>I confirm that I want to send this one email now.</span></label>
-                  <button className="danger-action full-field" disabled={working || !queueForm.confirmed || !control?.canManage} onClick={() => runAction({ action: "send_now", emailId: queueForm.emailId, confirm: true }, "Brevo accepted the email. The database has been updated.")}>Send this email now</button>
+                  <div className="button-stack"><button disabled={working || !control?.canManage} onClick={() => runAction({ action: "approve", emailId: queueForm.emailId }, "Email approved. It has not been sent.")}>Approve draft</button><button disabled={working || paused || !control?.canManage || !queueForm.scheduledFor} onClick={() => runAction({ action: "schedule", emailId: queueForm.emailId, scheduledFor: new Date(queueForm.scheduledFor).toISOString() }, "Email added to the scheduled queue.")}>Schedule</button></div>
+                  <label className="confirm-box full-field"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(e) => setQueueForm({ ...queueForm, confirmed: e.target.checked })} /><span>{paused ? "Sending is paused. Turn off Pause all before using immediate send." : "I confirm that I want to send this one email now."}</span></label>
+                  <button className="danger-action full-field" disabled={working || paused || !queueForm.confirmed || !control?.canManage} onClick={() => runAction({ action: "send_now", emailId: queueForm.emailId, confirm: true }, "Brevo accepted the email. The database has been updated.")}>Send this email now</button>
                 </div>
               </article>
               <article className="panel control-card"><p className="eyebrow">Scheduled queue</p><h2>Upcoming sends</h2><div className="mini-list">{control?.queue?.length ? control.queue.slice(0, 8).map((item) => <div key={item.id}><span><strong>{String(item.status)}</strong><small>{item.scheduled_for ? new Date(String(item.scheduled_for)).toLocaleString("en-IN") : "Awaiting time"}</small></span>{String(item.status).includes("scheduled") && <button disabled={!control?.canManage || working} onClick={() => runAction({ action: "cancel_scheduled", queueId: item.id }, "Scheduled email cancelled.")}>Cancel</button>}</div>) : <p className="muted-copy">No emails are scheduled.</p>}</div></article>
@@ -469,30 +648,30 @@ export default function Home() {
               <article className="panel control-card">
                 <p className="eyebrow">Live connections</p><h2>API status</h2>
                 <div className="api-grid"><div><span className={`api-dot ${control?.providers?.database ? "online" : "offline"}`} /><strong>Supabase</strong><small>{control?.providers?.database ? "Connected" : "Unavailable"}</small></div><div><span className={`api-dot ${control?.providers?.brevo ? "online" : "offline"}`} /><strong>Brevo</strong><small>{control?.providers?.brevo ? "Connected" : "Unavailable"}</small></div></div>
-                <button onClick={loadControl}>Check connections</button>
+                <button onClick={loadControl} disabled={refreshing}>{refreshing ? "Checking…" : "Check connections"}</button>
               </article>
               <article className="panel control-card wide-card">
                 <div className="panel-heading"><div><p className="eyebrow">Sending identity</p><h2>Tanishka &lt;tanishka@iknowai.in&gt;</h2></div><StatusPill value="active" /></div>
-                <div className="identity-grid"><div><span>Reply-To</span><strong>{control?.replyTo || "tanishka@iknowai.in"}</strong></div><div><span>Default mode</span><strong>Manual approval</strong></div><div><span>Timezone</span><strong>Asia/Kolkata</strong></div><div><span>Campaign state</span><strong>On hold</strong></div></div>
-                <form className="policy-row" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}><label>Daily limit<input name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /></label><label>Delay (minutes)<input name="delay" type="number" min="1" defaultValue={control?.settings?.minimum_delay_minutes || 5} /></label><label>Start<input name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /></label><label>End<input name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /></label><label className="confirm-box"><input name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span>Pause all</span></label><button className="primary-action">Save controls</button></form>
+                <div className="identity-grid"><div><span>Reply-To</span><strong>{control?.replyTo || "tanishka@iknowai.in"}</strong></div><div><span>Default mode</span><strong>Manual approval</strong></div><div><span>Timezone</span><strong>Asia/Kolkata</strong></div><div><span>Campaign state</span><strong>{paused ? "On hold" : "Active"}</strong></div></div>
+                <form className="policy-row" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}><label>Daily limit<input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /></label><label>Delay (minutes)<input disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" defaultValue={control?.settings?.minimum_delay_minutes || 5} /></label><label>Start<input disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /></label><label>End<input disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /></label><label className="confirm-box"><input disabled={!control?.canManage || working} name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span>Pause all</span></label><button disabled={!control?.canManage || working} className="primary-action">Save controls</button></form>
               </article>
             </section>
           )}
 
           {section === "contacts" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Audience</p><h2>{data.contacts.length} contacts</h2></div><span>{data.contacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span></div>
+              <div className="panel-heading"><div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div><span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span></div>
               <div className="table-wrap"><table><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th></tr></thead><tbody>
-                {data.contacts.filter((contact) => !search || `${contactDisplayName(contact)} ${contact.email} ${contact.company}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td></tr>)}
+                {displayContacts.filter((contact) => !search || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td></tr>)}
               </tbody></table></div>
             </section>
           )}
 
           {section === "companies" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{data.companies.length} companies</h2></div><span>Deduplicated by domain</span></div>
+              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><span>Deduplicated by domain</span></div>
               <div className="company-grid">
-                {data.companies.filter((company) => !search || `${company.name} ${company.industry}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small></div></article>)}
+                {displayCompanies.filter((company) => !search || `${company.name} ${company.industry || ""} ${company.website || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></article>)}
               </div>
             </section>
           )}
@@ -501,7 +680,8 @@ export default function Home() {
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Audit trail</p><h2>Recent activity</h2></div><span>Latest 100 events</span></div>
               <div className="timeline">
-                {data.activity.map((item, index) => <div className="timeline-item" key={`${item.createdAt}-${index}`}><span className="timeline-dot" /><div><strong>{prettyStatus(item.action)}</strong><p>{item.company || item.email || "System-wide operation"}</p><small>{compactDate(item.createdAt)}</small></div></div>)}
+                {displayActivity.map((item, index) => <div className="timeline-item" key={`${item.id || item.createdAt}-${index}`}><span className="timeline-dot" /><div><strong>{prettyStatus(item.action)}</strong><p>{item.company || item.email || "System-wide operation"}</p><small>{compactDate(item.createdAt)}</small></div></div>)}
+                {!displayActivity.length && <div className="empty-state">No activity has been recorded yet.</div>}
               </div>
             </section>
           )}
@@ -510,15 +690,15 @@ export default function Home() {
 
       {selectedEmail && (
         <div className="drawer-backdrop" onMouseDown={() => setSelectedEmail(null)}>
-          <aside className="email-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label="Email preview">
-            <div className="drawer-header"><div><p className="eyebrow">Email preview</p><h2>{selectedEmail.company}</h2></div><button onClick={() => setSelectedEmail(null)} aria-label="Close email preview">×</button></div>
+          <aside className="email-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label="Email preview" role="dialog" aria-modal="true">
+            <div className="drawer-header"><div><p className="eyebrow">Email preview</p><h2>{selectedEmail.company}</h2></div><button type="button" onClick={() => setSelectedEmail(null)} aria-label="Close email preview">×</button></div>
             <div className="email-meta"><div><span>To</span><strong>{selectedEmail.recipient}</strong></div><div><span>Subject</span><strong>{selectedEmail.subject}</strong></div><div><span>Campaign</span><strong>{selectedEmail.campaign}</strong></div><div><span>Status</span><StatusPill value={selectedEmail.sendStatus || selectedEmail.status} /></div></div>
-            <iframe title={`Preview of ${selectedEmail.subject}`} sandbox="" srcDoc={`<style>body{font-family:Calibri,Arial,sans-serif;color:#25262b;line-height:1.5;padding:24px;font-size:11pt}a{color:#5d45db}li{margin:7px 0}</style>${personalizeGreeting(selectedEmail.html, selectedEmail.recipient)}`} />
+            <iframe title={`Preview of ${selectedEmail.subject}`} sandbox="" srcDoc={`<style>body{font-family:Calibri,Arial,sans-serif;color:#25262b;line-height:1.55;padding:24px;font-size:11pt}a{color:#4d3dc4}li{margin:7px 0}</style>${personalizeGreeting(selectedEmail.html, selectedEmail.recipient, displayContacts)}`} />
             <div className="drawer-footer"><span>Version {selectedEmail.version} · {compactDate(selectedEmail.generatedAt)}</span><button onClick={() => navigator.clipboard?.writeText(selectedEmail.subject)}>Copy subject</button></div>
           </aside>
         </div>
       )}
-      {notice && <div className="toast" role="status"><span>{notice}</span><button onClick={() => setNotice("")}>×</button></div>}
+      {notice && <div className={`toast ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss notification">×</button></div>}
     </div>
   );
 }
