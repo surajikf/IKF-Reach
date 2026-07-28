@@ -41,10 +41,25 @@ function greetingName(email: string, supplied?: string) {
     : "Sir/Madam";
 }
 
-function draftHtml(input: { email: string; name?: string; company: string; brief?: string }) {
+type WebsiteResearch = {
+  website: string;
+  companyName: string;
+  title: string;
+  description: string;
+  summary: string;
+  focusAreas: string[];
+  discoveredEmails: string[];
+  pagesReviewed: string[];
+};
+
+function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null }) {
   const name = greetingName(input.email, input.name);
-  const context = input.brief?.trim() || `${input.company}'s priorities, operations, and growth plans`;
-  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5"><p>Dear ${name},</p><p>Considering <strong><u>${input.company}</u></strong> and its focus on ${context}, there is a strong opportunity to use AI for practical productivity, knowledge sharing, stakeholder engagement, and leadership decision-making.</p><p>We are conducting a practical <strong>AI Leadership Masterclass</strong>. The session can be tailored around:</p><ul><li><strong>AI-enabled research and reporting</strong></li><li><strong>Workflow automation and operational productivity</strong></li><li><strong>Sales, marketing, and stakeholder engagement</strong></li><li><strong>Knowledge management and decision support</strong></li><li><strong>Responsible AI adoption frameworks</strong></li></ul><p>The objective is to identify immediate opportunities while building a structured roadmap for AI adoption.</p><p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p><p><strong>Please let me know a suitable time to connect.</strong></p><p>Regards,<br><strong>Tanishka</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p></div>`;
+  const topic = escapeHtml(input.topic?.trim() || "AI Native Thinking Masterclass");
+  const company = escapeHtml(input.company);
+  const researchedContext = input.research?.summary || input.research?.description || "";
+  const context = escapeHtml(input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`);
+  const focusAreas = input.research?.focusAreas?.length ? input.research.focusAreas.slice(0, 3).map(escapeHtml).join(", ") : "productivity, knowledge workflows, and stakeholder engagement";
+  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5"><p>Dear ${escapeHtml(name)},</p><p>While reviewing <strong><u>${company}</u></strong>, I noted its focus on ${context}. This creates a relevant opportunity to apply <strong>${topic}</strong> thinking across ${focusAreas}.</p><p>We would be delighted to conduct a practical <strong>${topic}</strong> session tailored to your leadership and functional teams. The discussion can cover:</p><ul><li><strong>AI-enabled research, analysis, and reporting</strong></li><li><strong>Workflow automation and operational productivity</strong></li><li><strong>Sales, marketing, and stakeholder engagement</strong></li><li><strong>Knowledge management and decision support</strong></li><li><strong>Responsible AI adoption frameworks</strong></li></ul><p>The objective is to identify immediate, measurable opportunities and build a structured roadmap aligned with <strong><u>${company}</u></strong>.</p><p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p><p><strong>Please let me know a suitable time to connect.</strong></p><p>Regards,<br><strong>Tanishka</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p></div>`;
 }
 
 export async function GET(req: NextRequest) {
@@ -114,23 +129,60 @@ export async function POST(req: NextRequest) {
     const user = actor(req);
 
     if (body.action === "create_draft") {
-      const email = String(body.email || "").trim().toLowerCase();
-      const companyName = String(body.company || "").trim();
-      if (!/^\S+@\S+\.\S+$/.test(email) || !companyName) return NextResponse.json({ ok: false, error: "A valid email and company are required." }, { status: 400 });
-      const domain = email.split("@")[1];
-      let companies = await db(`companies?select=*&normalized_domain=eq.${encodeURIComponent(domain)}&limit=1`);
-      if (!companies.length) companies = await db("companies", { method: "POST", body: JSON.stringify({ name: companyName, normalized_name: companyName.toLowerCase(), normalized_domain: domain, website: body.website || `https://${domain}`, research_data: { brief: body.brief || "", requested_by: user } }) });
-      const company = companies[0];
-      let contacts = await db(`contacts?select=*&normalized_email=eq.${encodeURIComponent(email)}&limit=1`);
-      if (!contacts.length) contacts = await db("contacts", { method: "POST", body: JSON.stringify({ company_id: company.id, full_name: body.name || null, email, normalized_email: email, data_confidence: "user_provided", source: "dashboard" }) });
-      const contact = contacts[0];
-      const campaigns = await db("campaigns?select=*&name=eq.AI%20Leadership%20Masterclass%20Outreach&limit=1");
-      const campaign = campaigns[0];
-      const existing = await db(`generated_emails?select=version&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
-      const html = draftHtml({ email, name: body.name, company: companyName, brief: body.brief });
-      const drafts = await db("generated_emails", { method: "POST", body: JSON.stringify({ company_id: company.id, contact_id: contact.id, campaign_id: campaign.id, version: (existing[0]?.version || 0) + 1, subject: `${companyName} - AI Native Thinking Masterclass`, html_body: html, status: "draft_pending_review", personalization_data: { greeting_name: greetingName(email, body.name), sender_name: sender.name, sender_email: sender.email, reply_to_email: replyTo(), email_font: "Calibri", email_font_size: "11pt", bold_underline_organization: true, sending_hold: true } }) });
-      await db("research_jobs", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), email, company: companyName, website: body.website || null, brief: body.brief || null, status: "draft_created", created_by: user, result: { generated_email_id: drafts[0].id } }) });
-      return NextResponse.json({ ok: true, draft: drafts[0] });
+      const result = await createDraftRecord({
+        email: body.email,
+        name: body.name,
+        company: body.company,
+        website: body.website,
+        brief: body.brief,
+        topic: body.topic,
+        source: "single_form",
+      }, user);
+      return NextResponse.json({ ok: true, draft: result.draft, research: result.research });
+    }
+
+    if (body.action === "research_batch") {
+      const topic = String(body.topic || "").trim();
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
+      const documentText = body.document ? await extractDocumentText(body.document) : "";
+      const rawInput = `${String(body.rawInput || "")}\n${documentText}`.trim();
+      const parsedContacts = parseContactInput(rawInput);
+      const suppliedWebsites = extractWebsites(String(body.websites || ""));
+      if (!parsedContacts.length && !suppliedWebsites.length) {
+        return NextResponse.json({ ok: false, error: "Paste contacts, enter a website, or upload a supported document." }, { status: 400 });
+      }
+
+      const contactInputs = [...parsedContacts];
+      for (const website of suppliedWebsites.slice(0, 5)) {
+        const research = await researchWebsite(website);
+        for (const email of research.discoveredEmails.slice(0, 5)) {
+          if (!contactInputs.some((item) => item.email === email)) {
+            contactInputs.push({ email, name: "", website: research.website, company: research.companyName, research });
+          }
+        }
+      }
+      if (!contactInputs.length) {
+        return NextResponse.json({ ok: false, error: "No email addresses were found. Try a contact/about page or paste at least one email." }, { status: 400 });
+      }
+      if (contactInputs.length > 25) {
+        return NextResponse.json({ ok: false, error: "Process up to 25 contacts at a time so each website can be researched carefully." }, { status: 400 });
+      }
+
+      const results: Array<Record<string, any>> = [];
+      for (const input of contactInputs) {
+        try {
+          const result = await createDraftRecord({
+            ...input,
+            topic,
+            brief: String(body.brief || ""),
+            source: body.document?.name ? `document:${body.document.name}` : "pasted_list",
+          }, user);
+          results.push({ ok: true, email: input.email, company: result.company.name, name: greetingName(input.email, input.name), discoveredEmails: result.research?.discoveredEmails || [], researchSummary: result.research?.summary || "", draftId: result.draft.id });
+        } catch (error) {
+          results.push({ ok: false, email: input.email, error: error instanceof Error ? error.message : "Research failed" });
+        }
+      }
+      return NextResponse.json({ ok: true, created: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results });
     }
 
     if (body.action === "approve") {
@@ -352,6 +404,250 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Action failed" }, { status: 500 });
   }
+}
+
+async function createDraftRecord(input: Record<string, any>, user: string) {
+  const email = String(input.email || "").trim().toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error("A valid email address is required.");
+  const emailDomain = email.split("@")[1];
+  const inferredWebsite = input.website || (!isPublicMailbox(emailDomain) ? `https://${emailDomain}` : "");
+  let research: WebsiteResearch | null = input.research || null;
+  if (!research && inferredWebsite) {
+    try { research = await researchWebsite(inferredWebsite); } catch {}
+  }
+  const companyName = String(input.company || research?.companyName || companyFromDomain(emailDomain)).trim();
+  if (!companyName || (isPublicMailbox(emailDomain) && companyName === companyFromDomain(emailDomain) && !input.company && !research)) {
+    throw new Error(`Add the company or website for ${email}; its public-mail domain does not identify an organization.`);
+  }
+  const companyDomain = research?.website ? new URL(research.website).hostname.replace(/^www\./, "") : emailDomain;
+  const website = research?.website || inferredWebsite || null;
+  const researchData = {
+    brief: String(input.brief || ""),
+    topic: String(input.topic || "AI Native Thinking Masterclass"),
+    source: input.source || "dashboard",
+    requested_by: user,
+    researched_at: new Date().toISOString(),
+    website_title: research?.title || "",
+    website_description: research?.description || "",
+    research_summary: research?.summary || "",
+    focus_areas: research?.focusAreas || [],
+    discovered_emails: research?.discoveredEmails || [],
+    pages_reviewed: research?.pagesReviewed || [],
+  };
+
+  let companies = await db(`companies?select=*&normalized_domain=eq.${encodeURIComponent(companyDomain)}&limit=1`);
+  if (!companies.length) {
+    companies = await db("companies", { method: "POST", body: JSON.stringify({ name: companyName, normalized_name: companyName.toLowerCase(), normalized_domain: companyDomain, website, research_data: researchData }) });
+  } else {
+    const existingResearch = companies[0].research_data && typeof companies[0].research_data === "object" ? companies[0].research_data : {};
+    const updated = await db(`companies?id=eq.${companies[0].id}`, { method: "PATCH", body: JSON.stringify({ website: website || companies[0].website, research_data: { ...existingResearch, ...researchData } }) });
+    companies = updated.length ? updated : companies;
+  }
+  const company = companies[0];
+
+  let contacts = await db(`contacts?select=*&normalized_email=eq.${encodeURIComponent(email)}&limit=1`);
+  if (!contacts.length) {
+    contacts = await db("contacts", { method: "POST", body: JSON.stringify({ company_id: company.id, full_name: input.name || null, email, normalized_email: email, data_confidence: input.name ? "user_provided" : "domain_researched", source: input.source || "intelligence_studio" }) });
+  } else if (input.name && !contacts[0].full_name) {
+    const updated = await db(`contacts?id=eq.${contacts[0].id}`, { method: "PATCH", body: JSON.stringify({ full_name: input.name, data_confidence: "user_provided" }) });
+    contacts = updated.length ? updated : contacts;
+  }
+  const contact = contacts[0];
+  let campaigns = await db("campaigns?select=*&name=eq.AI%20Leadership%20Masterclass%20Outreach&limit=1");
+  if (!campaigns.length) campaigns = await db("campaigns?select=*&order=created_at.desc&limit=1");
+  const campaign = campaigns[0];
+  if (!campaign) throw new Error("No outreach campaign is configured.");
+  const existing = await db(`generated_emails?select=version&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
+  const topic = String(input.topic || "AI Native Thinking Masterclass").trim();
+  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research });
+  const drafts = await db("generated_emails", {
+    method: "POST",
+    body: JSON.stringify({
+      company_id: company.id,
+      contact_id: contact.id,
+      campaign_id: campaign.id,
+      version: (existing[0]?.version || 0) + 1,
+      subject: `${companyName} - ${topic}`,
+      html_body: html,
+      status: "draft_pending_review",
+      personalization_data: {
+        greeting_name: greetingName(email, input.name),
+        greeting_source: input.name ? "user_provided" : "email_localpart_or_fallback",
+        organization_name: companyName,
+        topic,
+        research_summary: research?.summary || "",
+        focus_areas: research?.focusAreas || [],
+        website,
+        sender_name: sender.name,
+        sender_email: sender.email,
+        reply_to_email: replyTo(),
+        email_font: "Calibri",
+        email_font_size: "11pt",
+        bold_underline_organization: true,
+        sending_hold: true,
+      },
+    }),
+  });
+  await db("research_jobs", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), email, company: companyName, website, brief: input.brief || null, status: "draft_created", created_by: user, result: { generated_email_id: drafts[0].id, research: researchData } }) });
+  return { draft: drafts[0], company, contact, research };
+}
+
+async function researchWebsite(rawUrl: string): Promise<WebsiteResearch> {
+  const firstUrl = safeWebsiteUrl(rawUrl);
+  const origin = new URL(firstUrl).origin;
+  const pages = [firstUrl];
+  const reviewed: string[] = [];
+  const texts: string[] = [];
+  let firstHtml = "";
+  for (let index = 0; index < pages.length && index < 3; index += 1) {
+    const url = pages[index];
+    try {
+      const response = await fetchWithTimeout(url);
+      if (!response.ok || !String(response.headers.get("content-type") || "").includes("text/html")) continue;
+      const html = (await response.text()).slice(0, 350_000);
+      if (!firstHtml) firstHtml = html;
+      reviewed.push(url);
+      texts.push(htmlToText(html).slice(0, 24_000));
+      if (index === 0) {
+        for (const href of extractUsefulLinks(html, origin)) if (!pages.includes(href)) pages.push(href);
+      }
+    } catch {}
+  }
+  if (!reviewed.length) throw new Error(`The website ${new URL(firstUrl).hostname} could not be read.`);
+  const combined = texts.join(" ");
+  const title = decodeEntities(firstHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").trim();
+  const description = decodeEntities(firstHtml.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']/i)?.[1] || firstHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["']/i)?.[1] || "").trim();
+  const emails = [...new Set(`${firstHtml} ${combined}`.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.map((item) => item.toLowerCase()).filter((item) => !/\.(png|jpg|jpeg|gif|svg|webp)$/i.test(item)) || [])];
+  const companyName = cleanCompanyTitle(title) || companyFromDomain(new URL(firstUrl).hostname);
+  const focusAreas = detectFocusAreas(`${title} ${description} ${combined}`);
+  const summary = (description || meaningfulExcerpt(combined, companyName)).slice(0, 420);
+  return { website: firstUrl, companyName, title, description, summary, focusAreas, discoveredEmails: emails.slice(0, 20), pagesReviewed: reviewed };
+}
+
+async function fetchWithTimeout(url: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  try {
+    return await fetch(url, { redirect: "follow", signal: controller.signal, headers: { "User-Agent": "IKF-Outreach-Research/1.0 (+https://www.ikf.co.in)" } });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function safeWebsiteUrl(value: string) {
+  const withProtocol = /^https?:\/\//i.test(value.trim()) ? value.trim() : `https://${value.trim()}`;
+  const url = new URL(withProtocol);
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only public HTTP or HTTPS websites can be researched.");
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || /^127\.|^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\./.test(host)) throw new Error("Private network addresses cannot be researched.");
+  url.hash = "";
+  return url.toString();
+}
+
+function extractUsefulLinks(html: string, origin: string) {
+  const links: string[] = [];
+  for (const match of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
+    try {
+      const url = new URL(match[1], origin);
+      if (url.origin === origin && /\/(about|contact|company|who-we-are)(\/|$)/i.test(url.pathname)) links.push(url.toString());
+    } catch {}
+  }
+  return [...new Set(links)].slice(0, 2);
+}
+
+function htmlToText(html: string) {
+  return decodeEntities(html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function meaningfulExcerpt(text: string, company: string) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  const index = cleaned.toLowerCase().indexOf(company.toLowerCase().split(" ")[0]);
+  return cleaned.slice(Math.max(0, index), Math.max(0, index) + 380) || cleaned.slice(0, 380);
+}
+
+function detectFocusAreas(text: string) {
+  const rules: Array<[RegExp, string]> = [
+    [/manufactur|plant|industrial|automotive/i, "manufacturing and operational excellence"],
+    [/software|technology|digital|cloud|data/i, "digital products and technology"],
+    [/market|brand|customer|sales|advertis/i, "customer engagement and growth"],
+    [/health|hospital|medical|pharma/i, "healthcare and service delivery"],
+    [/education|training|academy|learning/i, "learning and knowledge development"],
+    [/association|member|federation|council/i, "member services and stakeholder engagement"],
+    [/sustainab|energy|environment|climate/i, "sustainability and responsible growth"],
+    [/finance|bank|insurance|investment/i, "financial services and decision support"],
+  ];
+  const matches = rules.filter(([pattern]) => pattern.test(text)).map(([, label]) => label);
+  return matches.length ? matches.slice(0, 4) : ["operations", "knowledge workflows", "stakeholder engagement"];
+}
+
+function cleanCompanyTitle(title: string) {
+  return title.split(/\s+[|–—]\s+|\s+-\s+/)[0].replace(/\b(home|official site|welcome)\b/gi, "").trim();
+}
+
+function companyFromDomain(domain: string) {
+  const base = domain.replace(/^www\./, "").split(".")[0].replace(/[-_]+/g, " ");
+  return base.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function isPublicMailbox(domain: string) {
+  return new Set(["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "rediffmail.com", "icloud.com", "proton.me", "protonmail.com"]).has(domain.toLowerCase());
+}
+
+function parseContactInput(text: string) {
+  const contacts: Array<{ email: string; name: string; company?: string; website?: string; research?: WebsiteResearch }> = [];
+  for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    const emails = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+    const website = extractWebsites(line)[0];
+    for (const rawEmail of emails) {
+      const email = rawEmail.toLowerCase();
+      const angleName = line.match(new RegExp(`^\\s*([^<,;]+)\\s*<\\s*${escapeRegExp(rawEmail)}`, "i"))?.[1]?.trim() || "";
+      const fields = line.split(/[,;\t]/).map((item) => item.trim()).filter(Boolean);
+      const nonEmailFields = fields.filter((item) => !item.includes("@") && !/^https?:\/\//i.test(item));
+      const name = angleName || (nonEmailFields.length ? nonEmailFields[0] : "");
+      const company = nonEmailFields.length > 1 ? nonEmailFields[1] : undefined;
+      if (!contacts.some((item) => item.email === email)) contacts.push({ email, name, company, website });
+    }
+  }
+  return contacts;
+}
+
+function extractWebsites(text: string) {
+  const matches = text.match(/(?:https?:\/\/|www\.)[^\s,;<>]+/gi) || [];
+  return [...new Set(matches.map((item) => item.replace(/[).]+$/, "")).map((item) => item.startsWith("www.") ? `https://${item}` : item))];
+}
+
+async function extractDocumentText(document: Record<string, any>) {
+  const name = String(document.name || "").toLowerCase();
+  const raw = String(document.dataBase64 || "").replace(/^data:[^,]+,/, "");
+  if (!raw || raw.length > 8_000_000) throw new Error("Upload a document smaller than 6 MB.");
+  const bytes = Uint8Array.from(atob(raw), (char) => char.charCodeAt(0));
+  if (name.endsWith(".pdf")) {
+    const { extractText, getDocumentProxy } = await import("unpdf");
+    const pdf = await getDocumentProxy(bytes);
+    const result = await extractText(pdf, { mergePages: true });
+    return String(result.text || "").slice(0, 120_000);
+  }
+  if (name.endsWith(".docx")) {
+    const { unzipSync, strFromU8 } = await import("fflate");
+    const files = unzipSync(bytes);
+    const xml = files["word/document.xml"];
+    if (!xml) throw new Error("The DOCX file does not contain readable document text.");
+    return decodeEntities(strFromU8(xml).replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "")).slice(0, 120_000);
+  }
+  if (/\.(txt|csv|tsv)$/i.test(name)) return new TextDecoder().decode(bytes).slice(0, 120_000);
+  throw new Error("Supported documents are PDF, DOCX, CSV, TSV, and TXT.");
+}
+
+function decodeEntities(value: string) {
+  return value.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;|&apos;/g, "'");
+}
+
+function escapeHtml(value: string) {
+  return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function cleanIds(value: unknown): string[] {

@@ -147,7 +147,9 @@ export default function Home() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMode, setBulkMode] = useState<"schedule" | "send" | "test" | null>(null);
   const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
-  const [draftForm, setDraftForm] = useState({ email: "", name: "", company: "", website: "", brief: "" });
+  const [intakeForm, setIntakeForm] = useState({ topic: "AI Native Thinking Masterclass", rawInput: "", websites: "", brief: "" });
+  const [intakeFile, setIntakeFile] = useState<File | null>(null);
+  const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [queueForm, setQueueForm] = useState({ emailId: data.emails[0]?.id || "", scheduledFor: "", confirmed: false });
   const pageSize = 20;
 
@@ -245,6 +247,21 @@ export default function Home() {
       setBulkMode(null);
       setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
     }
+  }
+
+  async function runIntelligenceStudio() {
+    let document: Record<string, string> | undefined;
+    if (intakeFile) {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("The selected document could not be read."));
+        reader.readAsDataURL(intakeFile);
+      });
+      document = { name: intakeFile.name, type: intakeFile.type, dataBase64: dataUrl };
+    }
+    const result = await runAction({ action: "research_batch", ...intakeForm, document }, "Research completed and personalized drafts were created for review.");
+    if (result?.ok) setIntakeResults(result.results || []);
   }
 
   return (
@@ -386,19 +403,48 @@ export default function Home() {
           )}
 
           {section === "create" && (
-            <section className="workspace-grid">
-              <article className="panel control-card wide-card">
-                <div className="panel-heading"><div><p className="eyebrow">Research + generate</p><h2>Create personalized outreach</h2></div><StatusPill value="draft_pending_review" /></div>
-                <form className="control-form" onSubmit={async (event) => { event.preventDefault(); const result = await runAction({ action: "create_draft", ...draftForm }, "Draft created safely. It is waiting for review."); if (result?.ok) setDraftForm({ email: "", name: "", company: "", website: "", brief: "" }); }}>
-                  <label>Email address<input required type="email" value={draftForm.email} onChange={(e) => setDraftForm({ ...draftForm, email: e.target.value })} placeholder="name@company.com" /></label>
-                  <label>Contact name <small>Optional</small><input value={draftForm.name} onChange={(e) => setDraftForm({ ...draftForm, name: e.target.value })} placeholder="Derived when clear" /></label>
-                  <label>Company<input required value={draftForm.company} onChange={(e) => setDraftForm({ ...draftForm, company: e.target.value })} placeholder="Company or association" /></label>
-                  <label>Website <small>Optional</small><input value={draftForm.website} onChange={(e) => setDraftForm({ ...draftForm, website: e.target.value })} placeholder="https://company.com" /></label>
-                  <label className="full-field">Research brief<textarea rows={5} value={draftForm.brief} onChange={(e) => setDraftForm({ ...draftForm, brief: e.target.value })} placeholder="What the company does, priorities, pain points, and why the masterclass is relevant." /></label>
-                  <div className="form-actions full-field"><span>Creates a draft only. It cannot send automatically.</span><button className="primary-action" disabled={working}>{working ? "Creating…" : "Research & generate draft"}</button></div>
+            <section className="intelligence-layout">
+              <article className="panel intelligence-studio">
+                <div className="studio-hero">
+                  <div><p className="eyebrow">Research · enrich · personalize</p><h2>Outreach Intelligence Studio</h2><p>Bring whatever you have. The studio extracts contacts, researches company websites, discovers public email addresses, and creates review-ready drafts.</p></div>
+                  <div className="studio-steps"><span>1 · Add sources</span><span>2 · Research</span><span>3 · Review drafts</span></div>
+                </div>
+                <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio(); }}>
+                  <label className="topic-field"><span>What is this outreach about?</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI Native Thinking Masterclass for leadership teams" /><small>This topic is used in every subject line and personalized email.</small></label>
+                  <div className="source-grid">
+                    <label className="source-card">
+                      <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
+                      <textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
+                    </label>
+                    <label className="source-card">
+                      <span className="source-icon">www</span><strong>Add company websites</strong><small>We inspect public home, about, and contact pages.</small>
+                      <textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} />
+                    </label>
+                    <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
+                      <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB</small>
+                      <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => setIntakeFile(event.target.files?.[0] || null)} />
+                      <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
+                    </label>
+                  </div>
+                  <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
+                  <div className="studio-actions"><div><strong>Draft-only workflow</strong><span>Nothing is approved, scheduled, or sent automatically.</span></div><button className="primary-action" disabled={working || !control?.canManage}>{working ? "Researching websites…" : "Research & create drafts"}</button></div>
                 </form>
               </article>
-              <article className="panel control-card safety-card"><p className="eyebrow">Built-in guardrails</p><h2>Safe by default</h2><ul className="feature-list"><li>Manual approval required</li><li>Duplicate-contact protection</li><li>Personal name or Sir/Madam</li><li>Calibri 11 pt email format</li><li>Reply-To tanishka@iknowai.in</li><li>Every action logged</li></ul></article>
+
+              <aside className="studio-sidebar">
+                <article className="panel intelligence-card">
+                  <p className="eyebrow">How the intelligence works</p><h2>Smart, but reviewable</h2>
+                  <ol className="intelligence-list"><li><b>Extract</b><span>Find emails, names, websites, and company clues in pasted text or documents.</span></li><li><b>Enrich</b><span>Derive the organization from the domain and inspect its public web presence.</span></li><li><b>Personalize</b><span>Connect the company’s focus with your outreach topic and relevant use cases.</span></li><li><b>Address correctly</b><span>Use a clear personal name when confidently available; otherwise Dear Sir/Madam.</span></li><li><b>Save safely</b><span>Update companies and contacts, prevent duplicates, and create drafts for manual review.</span></li></ol>
+                </article>
+                <article className="panel guardrail-card"><span className="guardrail-dot" /><div><strong>Sending remains protected</strong><p>Reply-To is tanishka@iknowai.in. Approval is still mandatory.</p></div></article>
+              </aside>
+
+              {intakeResults.length > 0 && (
+                <section className="panel research-results">
+                  <div className="panel-heading"><div><p className="eyebrow">Research output</p><h2>{intakeResults.filter((item) => item.ok).length} drafts created</h2></div><button className="text-button" onClick={() => switchSection("emails")}>Review in Emails →</button></div>
+                  <div className="result-grid">{intakeResults.map((item, index) => <article key={`${item.email}-${index}`} className={item.ok ? "result-card" : "result-card failed"}><div><strong>{item.company || item.email}</strong><span>{item.email}</span></div><StatusPill value={item.ok ? "draft_pending_review" : "send_failed"} />{item.ok ? <><p>{item.researchSummary || "Company information saved from its domain and supplied context."}</p><small>Greeting: Dear {item.name || "Sir/Madam"}</small></> : <p>{item.error}</p>}</article>)}</div>
+                </section>
+              )}
             </section>
           )}
 
