@@ -5,7 +5,7 @@ import data from "./dashboard-data.json";
 
 type Section = "overview" | "create" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
-type ContactRecord = { id: string; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; createdAt?: string | null };
+type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null };
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
@@ -165,6 +165,8 @@ export default function Home() {
   const [emailCampaign, setEmailCampaign] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
+  const [selectedContact, setSelectedContact] = useState<ContactRecord | null>(null);
+  const [contactForm, setContactForm] = useState({ name: "", email: "", role: "", company: "", industry: "", website: "", country: "" });
   const [control, setControl] = useState<ControlData | null>(null);
   const [working, setWorking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -278,13 +280,16 @@ Please let me know a suitable time to connect.`,
   }, [displayEmails, queueForm.emailId]);
 
   useEffect(() => {
-    if (!selectedEmail) return;
+    if (!selectedEmail && !selectedContact) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedEmail(null);
+      if (event.key === "Escape") {
+        setSelectedEmail(null);
+        setSelectedContact(null);
+      }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [selectedEmail]);
+  }, [selectedEmail, selectedContact]);
 
   function switchSection(next: Section) {
     setSection(next);
@@ -420,6 +425,39 @@ Please let me know a suitable time to connect.`,
       return;
     }
     setIntakeFile(file);
+  }
+
+  function openContactEditor(contact: ContactRecord) {
+    setSelectedContact(contact);
+    setContactForm({
+      name: contact.name || "",
+      email: contact.email,
+      role: contact.role || "",
+      company: contact.company || "",
+      industry: contact.industry || "",
+      website: contact.companyWebsite || "",
+      country: contact.companyCountry || "",
+    });
+  }
+
+  async function saveContact() {
+    if (!selectedContact) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactForm.email.trim())) {
+      setNoticeTone("error");
+      setNotice("Enter a valid contact email address.");
+      return;
+    }
+    if (!contactForm.company.trim()) {
+      setNoticeTone("error");
+      setNotice("Add the contact’s company or organization.");
+      return;
+    }
+    const result = await runAction({
+      action: "update_contact",
+      contactId: selectedContact.id,
+      ...contactForm,
+    }, "Contact and organization details were updated in the database.");
+    if (result?.ok) setSelectedContact(null);
   }
 
   return (
@@ -644,16 +682,41 @@ Please let me know a suitable time to connect.`,
           )}
 
           {section === "settings" && (
-            <section className="workspace-grid">
-              <article className="panel control-card">
-                <p className="eyebrow">Live connections</p><h2>API status</h2>
-                <div className="api-grid"><div><span className={`api-dot ${control?.providers?.database ? "online" : "offline"}`} /><strong>Supabase</strong><small>{control?.providers?.database ? "Connected" : "Unavailable"}</small></div><div><span className={`api-dot ${control?.providers?.brevo ? "online" : "offline"}`} /><strong>Brevo</strong><small>{control?.providers?.brevo ? "Connected" : "Unavailable"}</small></div></div>
-                <button onClick={loadControl} disabled={refreshing}>{refreshing ? "Checking…" : "Check connections"}</button>
+            <section className="settings-console">
+              <article className={`panel settings-hero ${paused ? "is-paused" : "is-active"}`}>
+                <div><p className="eyebrow">Outreach operations</p><h2>Sending is {paused ? "paused and protected" : "active within your limits"}</h2><p>{paused ? "Drafting, research, contact editing, and review remain available. Scheduling and client sending are blocked." : "Only approved emails can be scheduled or sent, inside the delivery limits below."}</p></div>
+                <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </article>
-              <article className="panel control-card wide-card">
-                <div className="panel-heading"><div><p className="eyebrow">Sending identity</p><h2>Tanishka &lt;tanishka@iknowai.in&gt;</h2></div><StatusPill value="active" /></div>
-                <div className="identity-grid"><div><span>Reply-To</span><strong>{control?.replyTo || "tanishka@iknowai.in"}</strong></div><div><span>Default mode</span><strong>Manual approval</strong></div><div><span>Timezone</span><strong>Asia/Kolkata</strong></div><div><span>Campaign state</span><strong>{paused ? "On hold" : "Active"}</strong></div></div>
-                <form className="policy-row" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}><label>Daily limit<input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /></label><label>Delay (minutes)<input disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" defaultValue={control?.settings?.minimum_delay_minutes || 5} /></label><label>Start<input disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /></label><label>End<input disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /></label><label className="confirm-box"><input disabled={!control?.canManage || working} name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span>Pause all</span></label><button disabled={!control?.canManage || working} className="primary-action">Save controls</button></form>
+
+              <article className="panel settings-section">
+                <div className="settings-section-heading"><div><span className="settings-number">1</span><div><p className="eyebrow">System readiness</p><h2>Connections and sending identity</h2><p>These services must be available before any delivery action can work.</p></div></div><button onClick={loadControl} disabled={refreshing}>{refreshing ? "Checking…" : "Check connections"}</button></div>
+                <div className="connection-cards">
+                  <div><span className={`api-dot ${control?.providers?.database ? "online" : "offline"}`} /><div><strong>Supabase database</strong><small>Contacts, companies, campaigns, drafts, and activity</small></div><b>{control?.providers?.database ? "Connected" : "Unavailable"}</b></div>
+                  <div><span className={`api-dot ${control?.providers?.brevo ? "online" : "offline"}`} /><div><strong>Brevo delivery</strong><small>Test copies, scheduled delivery, and sending</small></div><b>{control?.providers?.brevo ? "Connected" : "Unavailable"}</b></div>
+                  <div><span className="identity-avatar">T</span><div><strong>Tanishka &lt;tanishka@iknowai.in&gt;</strong><small>Sender and Reply-To: {control?.replyTo || "tanishka@iknowai.in"}</small></div><b>Verified</b></div>
+                </div>
+              </article>
+
+              <article className="panel settings-section">
+                <div className="settings-section-heading"><div><span className="settings-number">2</span><div><p className="eyebrow">Process flow</p><h2>How an email moves through the system</h2><p>Every step is visible and reviewable. Nothing bypasses approval.</p></div></div></div>
+                <ol className="sending-flow">
+                  <li><span>1</span><div><strong>Create campaign drafts</strong><p>Add recipients, research sources, and your template. Drafts are grouped by campaign.</p></div></li>
+                  <li><span>2</span><div><strong>Review and approve</strong><p>Open each email, check personalization, and approve only the drafts you want.</p></div></li>
+                  <li><span>3</span><div><strong>Test or schedule</strong><p>Send a preview to your own inbox, or choose the first delivery time and spacing.</p></div></li>
+                  <li><span>4</span><div><strong>Track every result</strong><p>Brevo results and all database changes appear in the dashboard activity trail.</p></div></li>
+                </ol>
+              </article>
+
+              <article className="panel settings-section">
+                <div className="settings-section-heading"><div><span className="settings-number">3</span><div><p className="eyebrow">Delivery guardrails</p><h2>Control when and how fast emails can send</h2><p>All times use Asia/Kolkata. These limits apply to client delivery, not test previews.</p></div></div></div>
+                <form className="safety-form" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}>
+                  <label><span>Daily sending limit</span><input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
+                  <label><span>Minimum spacing</span><div className="input-suffix"><input disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" defaultValue={control?.settings?.minimum_delay_minutes || 5} /><b>minutes</b></div><small>Delay between consecutive emails</small></label>
+                  <label><span>Sending starts</span><input disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /><small>Earliest allowed delivery</small></label>
+                  <label><span>Sending ends</span><input disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /><small>Latest allowed delivery</small></label>
+                  <label className={`pause-control ${paused ? "selected" : ""}`}><input disabled={!control?.canManage || working} name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span><strong>Pause all client sending</strong><small>Recommended while campaigns are being prepared or reviewed.</small></span></label>
+                  <div className="safety-actions"><div><strong>{control?.canManage ? "Changes apply immediately after saving." : "Sign in with an authorized IKF account to change controls."}</strong><span>Manual approval remains mandatory in both states.</span></div><button disabled={!control?.canManage || working} className="primary-action">{working ? "Saving…" : "Save delivery controls"}</button></div>
+                </form>
               </article>
             </section>
           )}
@@ -661,8 +724,8 @@ Please let me know a suitable time to connect.`,
           {section === "contacts" && (
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div><span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span></div>
-              <div className="table-wrap"><table><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th></tr></thead><tbody>
-                {displayContacts.filter((contact) => !search || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td></tr>)}
+              <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
+                {displayContacts.filter((contact) => !search || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>)}
               </tbody></table></div>
             </section>
           )}
@@ -695,6 +758,27 @@ Please let me know a suitable time to connect.`,
             <div className="email-meta"><div><span>To</span><strong>{selectedEmail.recipient}</strong></div><div><span>Subject</span><strong>{selectedEmail.subject}</strong></div><div><span>Campaign</span><strong>{selectedEmail.campaign}</strong></div><div><span>Status</span><StatusPill value={selectedEmail.sendStatus || selectedEmail.status} /></div></div>
             <iframe title={`Preview of ${selectedEmail.subject}`} sandbox="" srcDoc={`<style>body{font-family:Calibri,Arial,sans-serif;color:#25262b;line-height:1.55;padding:24px;font-size:11pt}a{color:#4d3dc4}li{margin:7px 0}</style>${personalizeGreeting(selectedEmail.html, selectedEmail.recipient, displayContacts)}`} />
             <div className="drawer-footer"><span>Version {selectedEmail.version} · {compactDate(selectedEmail.generatedAt)}</span><button onClick={() => navigator.clipboard?.writeText(selectedEmail.subject)}>Copy subject</button></div>
+          </aside>
+        </div>
+      )}
+      {selectedContact && (
+        <div className="drawer-backdrop contact-editor-backdrop" onMouseDown={() => setSelectedContact(null)}>
+          <aside className="contact-editor" onMouseDown={(event) => event.stopPropagation()} aria-label="Edit contact" role="dialog" aria-modal="true">
+            <div className="drawer-header"><div><p className="eyebrow">Database contact</p><h2>Edit contact details</h2><p>Changes update Supabase and appear across Contacts and Companies.</p></div><button type="button" onClick={() => setSelectedContact(null)} aria-label="Close contact editor">×</button></div>
+            <form className="contact-editor-form" onSubmit={(event) => { event.preventDefault(); saveContact(); }}>
+              <div className="contact-form-section"><div><strong>Person</strong><span>Use only information you know or have verified.</span></div>
+                <label><span>Full name</span><div className="voice-field"><input value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} placeholder="Leave blank to use Sir/Madam" /><VoiceButton field="contactName" value={contactForm.name} onChange={(name) => setContactForm((current) => ({ ...current, name }))} label="contact name" /></div></label>
+                <label><span>Email address</span><input required type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
+                <label><span>Job title or role</span><div className="voice-field"><input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} placeholder="Example: Marketing Director" /><VoiceButton field="contactRole" value={contactForm.role} onChange={(role) => setContactForm((current) => ({ ...current, role }))} label="job title" /></div></label>
+              </div>
+              <div className="contact-form-section"><div><strong>Organization</strong><span>Organization changes are shared with its other contacts.</span></div>
+                <label><span>Company or organization</span><div className="voice-field"><input required value={contactForm.company} onChange={(event) => setContactForm({ ...contactForm, company: event.target.value })} /><VoiceButton field="contactCompany" value={contactForm.company} onChange={(company) => setContactForm((current) => ({ ...current, company }))} label="company name" /></div></label>
+                <label><span>Industry</span><div className="voice-field"><input value={contactForm.industry} onChange={(event) => setContactForm({ ...contactForm, industry: event.target.value })} placeholder="Example: Automotive manufacturing" /><VoiceButton field="contactIndustry" value={contactForm.industry} onChange={(industry) => setContactForm((current) => ({ ...current, industry }))} label="industry" /></div></label>
+                <label><span>Website</span><input type="url" value={contactForm.website} onChange={(event) => setContactForm({ ...contactForm, website: event.target.value })} placeholder="https://company.com" /></label>
+                <label><span>Country</span><div className="voice-field"><input value={contactForm.country} onChange={(event) => setContactForm({ ...contactForm, country: event.target.value })} placeholder="Example: India" /><VoiceButton field="contactCountry" value={contactForm.country} onChange={(country) => setContactForm((current) => ({ ...current, country }))} label="country" /></div></label>
+              </div>
+              <div className="contact-editor-actions"><button type="button" className="quiet-action" onClick={() => setSelectedContact(null)}>Cancel</button><button className="primary-action" disabled={working}>{working ? "Saving…" : "Save to database"}</button></div>
+            </form>
           </aside>
         </div>
       )}

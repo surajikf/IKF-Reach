@@ -131,12 +131,15 @@ export async function GET(req: NextRequest) {
       const company = companyById.get(item.company_id) || {};
       return {
         id: item.id,
+        companyId: item.company_id || null,
         name: item.full_name || null,
         email: item.email,
         role: item.job_title || null,
         confidence: item.data_confidence || item.source || "unverified",
         company: company.name || "Unknown organization",
         industry: company.industry || null,
+        companyWebsite: company.website || null,
+        companyCountry: company.country || null,
         createdAt: item.created_at,
       };
     });
@@ -275,6 +278,65 @@ export async function POST(req: NextRequest) {
         }
       }
       return NextResponse.json({ ok: true, created: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results });
+    }
+
+    if (body.action === "update_contact") {
+      const contactId = String(body.contactId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(contactId)) return NextResponse.json({ ok: false, error: "Choose a valid contact to edit." }, { status: 400 });
+      const email = String(body.email || "").trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return NextResponse.json({ ok: false, error: "Enter a valid contact email address." }, { status: 400 });
+      const companyName = cleanText(body.company, 180);
+      if (!companyName) return NextResponse.json({ ok: false, error: "Add the company or organization name." }, { status: 400 });
+      const contacts = await db(`contacts?select=*&id=eq.${encodeURIComponent(contactId)}&limit=1`);
+      const contact = contacts[0];
+      if (!contact) return NextResponse.json({ ok: false, error: "Contact not found." }, { status: 404 });
+      const duplicates = await db(`contacts?select=id&normalized_email=eq.${encodeURIComponent(email)}&limit=2`);
+      if (duplicates.some((item: Record<string, any>) => item.id !== contactId)) {
+        return NextResponse.json({ ok: false, error: "Another contact already uses this email address." }, { status: 409 });
+      }
+      const fullName = cleanText(body.name, 120) || null;
+      const role = cleanText(body.role, 140) || null;
+      const updatedContacts = await db(`contacts?id=eq.${encodeURIComponent(contactId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          full_name: fullName,
+          email,
+          normalized_email: email,
+          job_title: role,
+          data_confidence: "user_verified",
+        }),
+      });
+      let updatedCompany: Record<string, any> | null = null;
+      if (contact.company_id) {
+        const websiteInput = String(body.website || "").trim();
+        let website: string | null = null;
+        try {
+          website = websiteInput ? safeWebsiteUrl(websiteInput) : null;
+        } catch {
+          return NextResponse.json({ ok: false, error: "Enter a valid public company website." }, { status: 400 });
+        }
+        const companyRows = await db(`companies?id=eq.${encodeURIComponent(contact.company_id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: companyName,
+            normalized_name: companyName.toLowerCase(),
+            industry: cleanText(body.industry, 180) || null,
+            website,
+            country: cleanText(body.country, 100) || null,
+          }),
+        });
+        updatedCompany = companyRows[0] || null;
+      }
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          company_id: contact.company_id,
+          contact_id: contactId,
+          action: "contact_updated",
+          details: { email, company: companyName, updated_by: user },
+        }),
+      });
+      return NextResponse.json({ ok: true, contact: updatedContacts[0], company: updatedCompany });
     }
 
     if (body.action === "approve") {
@@ -732,6 +794,10 @@ function extractWebsites(text: string) {
 
 function cleanCampaignName(value: unknown) {
   return String(value || "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function cleanText(value: unknown, maxLength: number) {
+  return String(value || "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
 function renderEmailTemplate(template: string, values: { name: string; company: string; topic: string; research: string; focusAreas: string }) {
