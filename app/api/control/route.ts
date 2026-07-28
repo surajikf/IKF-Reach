@@ -112,7 +112,7 @@ export async function GET(req: NextRequest) {
         company: company.name || "Unknown organization",
         campaign: campaign.name || "Outreach",
         subject: item.subject,
-        html: item.html_body,
+        html: cleanupUnresolvedHtml(item.html_body),
         status: item.status,
         sendStatus: latestSend?.status || null,
         version: item.version,
@@ -342,6 +342,28 @@ export async function POST(req: NextRequest) {
     if (body.action === "approve") {
       const rows = await db(`generated_emails?id=eq.${body.emailId}`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
       return NextResponse.json({ ok: true, email: rows[0] });
+    }
+
+    if (body.action === "clean_unresolved_placeholders") {
+      const rows = await db("generated_emails?select=id,html_body,status&status=in.(draft_pending_review,approved)&limit=1000");
+      const changed = rows
+        .map((item: Record<string, any>) => ({ ...item, cleanHtml: cleanupUnresolvedHtml(item.html_body) }))
+        .filter((item: Record<string, any>) => item.cleanHtml !== item.html_body);
+      for (const group of chunk(changed, 20)) {
+        await Promise.all(group.map((item: Record<string, any>) =>
+          db(`generated_emails?id=eq.${item.id}`, { method: "PATCH", body: JSON.stringify({ html_body: item.cleanHtml }) })
+        ));
+      }
+      if (changed.length) {
+        await db("activity_log", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "unresolved_placeholders_cleaned",
+            details: { updated_drafts: changed.length, updated_by: user },
+          }),
+        });
+      }
+      return NextResponse.json({ ok: true, scanned: rows.length, updated: changed.length });
     }
 
     if (body.action === "approve_batch") {
@@ -924,6 +946,39 @@ function cleanText(value: unknown, maxLength: number) {
   return String(value || "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLength);
 }
 
+function cleanupTemplateText(value: string) {
+  return value
+    .split("\n")
+    .map((line) => {
+      let clean = line
+        .replace(/\{\{\s*[^{}]{1,80}\s*\}\}/g, "")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\b(?:with|using|through|about|regarding|around|for)\s+(?=(?:to|and|or)\b|[,.;:!?]|$)/gi, "")
+        .replace(/\s+([,.;:!?])/g, "$1")
+        .replace(/([,;:])(?:\s*[,;:])+/g, "$1")
+        .trim();
+      if (!clean || /^[-•*]\s*$/.test(clean) || /^[^.!?]{1,60}:\s*$/.test(clean)) return "";
+      if (/\b(?:is|are|was|were|with|for|about|using|through|includes?|offers?|provides?)\s*[.!?]$/i.test(clean)) return "";
+      return clean;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function cleanupUnresolvedHtml(value: unknown) {
+  let html = String(value || "")
+    .replace(/\{\{\s*[^{}]{1,80}\s*\}\}/g, "")
+    .replace(/\b(?:with|using|through|about|regarding|around|for)(?:\s|&nbsp;)+(?=(?:to|and|or)\b|[,.;:!?])/gi, "")
+    .replace(/(?:\s|&nbsp;)+([,.;:!?])/g, "$1")
+    .replace(/<(strong|u|em|b)>\s*<\/\1>/gi, "");
+  html = html
+    .replace(/<(p|li)>\s*(?:<br\s*\/?>\s*)*<\/\1>/gi, "")
+    .replace(/<ul>\s*<\/ul>/gi, "")
+    .replace(/[ \t]{2,}/g, " ");
+  return html.trim();
+}
+
 function renderEmailTemplate(template: string, values: { name: string; company: string; topic: string; research: string; focusAreas: string }) {
   const tokenValues: Record<string, string> = {
     name: escapeHtml(values.name),
@@ -933,17 +988,19 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
     focus_areas: escapeHtml(values.focusAreas),
   };
   const tokens: string[] = [];
-  const withTokens = template.replace(/\{\{\s*(name|company|topic|research|focus_areas)\s*\}\}/gi, (_, key: string) => {
+  const withTokens = template.replace(/\{\{\s*([a-z][a-z0-9_.-]{0,79})\s*\}\}/gi, (_, key: string) => {
+    const value = tokenValues[key.toLowerCase()] || "";
+    if (!value) return "";
     const marker = `IKFPERSONALIZATIONTOKEN${tokens.length}END`;
-    tokens.push(tokenValues[key.toLowerCase()]);
+    tokens.push(value);
     return marker;
   });
-  let safe = escapeHtml(withTokens);
+  let safe = escapeHtml(cleanupTemplateText(withTokens));
   tokens.forEach((value, index) => {
     safe = safe.replace(`IKFPERSONALIZATIONTOKEN${index}END`, value);
   });
   safe = safe.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return safe
+  return cleanupUnresolvedHtml(safe
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
@@ -954,7 +1011,7 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
       }
       return `<p>${lines.join("<br>")}</p>`;
     })
-    .join("");
+    .join(""));
 }
 
 async function extractDocumentText(document: Record<string, any>) {
@@ -1064,6 +1121,7 @@ function insideIndiaWindow(date: Date, start: string, end: string) {
 }
 
 async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string) {
+  const htmlContent = cleanupUnresolvedHtml(mail.html_body);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
@@ -1072,7 +1130,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
       replyTo: { email: replyTo() },
       to: [{ email: contact.email, name: contact.full_name || undefined }],
       subject: mail.subject,
-      htmlContent: mail.html_body,
+      htmlContent,
       ...(scheduledAt ? { scheduledAt } : {}),
       tags: ["ikf-outreach"],
     }),
@@ -1084,6 +1142,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
 
 async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string) {
   const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
+  const htmlContent = cleanupUnresolvedHtml(mail.html_body);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
@@ -1092,7 +1151,7 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
       replyTo: { email: replyTo() },
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
-      htmlContent: `${previewBanner}${mail.html_body}`,
+      htmlContent: `${previewBanner}${htmlContent}`,
       tags: ["ikf-outreach", "test-preview"],
     }),
   });
