@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import data from "./dashboard-data.json";
 
 type Section = "overview" | "create" | "campaigns" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
+type CampaignWorkspaceView = "overview" | "emails" | "delivery";
 type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
 type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null };
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
@@ -34,8 +35,6 @@ const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
   { id: "create", label: "Create outreach", icon: "+" },
   { id: "campaigns", label: "Campaigns", icon: "▦" },
-  { id: "emails", label: "Emails", icon: "✉" },
-  { id: "queue", label: "Approval queue", icon: "✓" },
   { id: "contacts", label: "Contacts", icon: "◎" },
   { id: "companies", label: "Companies", icon: "◇" },
   { id: "settings", label: "Controls & APIs", icon: "⚙" },
@@ -201,6 +200,7 @@ Please let me know a suitable time to connect.`,
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", delayMinutes: 5, confirmed: false });
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
+  const [campaignWorkspaceView, setCampaignWorkspaceView] = useState<CampaignWorkspaceView>("overview");
   const pageSize = 20;
 
   async function loadControl() {
@@ -286,6 +286,8 @@ Please let me know a suitable time to connect.`,
   const selectedCampaignApproved = selectedCampaignEmails.filter((email) => email.status === "approved").length;
   const selectedCampaignScheduled = selectedCampaignEmails.filter((email) => email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")).length;
   const selectedCampaignSent = selectedCampaignEmails.filter((email) => email.status === "sent" || email.sendStatus === "sent").length;
+  const selectedCampaignEmailRecords = selectedCampaignEmails.filter((email) => selectedIds.has(email.id));
+  const selectedCampaignUnapproved = selectedCampaignEmailRecords.filter((email) => email.status !== "approved").length;
   const scheduledCampaignGroups = useMemo(() => {
     const groups = new Map<string, { id: string; name: string; count: number; first: string | null; last: string | null }>();
     for (const item of control?.queue || []) {
@@ -352,6 +354,20 @@ Please let me know a suitable time to connect.`,
     sent: campaignSummaries.filter((campaign) => campaign.lifecycle === "completed").length,
     attention: campaignSummaries.filter((campaign) => campaign.lifecycle === "needs_attention").length,
   }), [campaignSummaries]);
+  const campaignEmailRows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return (selectedCampaignSummary?.emails || []).filter((email) => {
+      const matchesTerm = !term || `${email.company} ${email.recipient} ${email.subject}`.toLowerCase().includes(term);
+      const status = email.sendStatus || email.status;
+      const matchesStatus = emailStatus === "all" ||
+        (emailStatus === "draft" && status === "draft_pending_review") ||
+        (emailStatus === "failed" && Boolean(status?.includes("fail") || status?.includes("not_sent"))) ||
+        status === emailStatus;
+      return matchesTerm && matchesStatus;
+    });
+  }, [selectedCampaignSummary, emailStatus, search]);
+  const campaignEmailPages = Math.max(1, Math.ceil(campaignEmailRows.length / pageSize));
+  const pagedCampaignEmails = campaignEmailRows.slice((page - 1) * pageSize, page * pageSize);
   const filteredEmails = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayEmails.filter((email) => {
@@ -373,6 +389,10 @@ Please let me know a suitable time to connect.`,
   useEffect(() => {
     if (page > pages) setPage(pages);
   }, [page, pages]);
+
+  useEffect(() => {
+    if (campaignWorkspaceView === "emails" && page > campaignEmailPages) setPage(campaignEmailPages);
+  }, [campaignEmailPages, campaignWorkspaceView, page]);
 
   useEffect(() => {
     if (displayCampaigns.length && !displayCampaigns.some((campaign) => campaign.id === queueForm.campaignId)) {
@@ -397,6 +417,18 @@ Please let me know a suitable time to connect.`,
     setMobileMenuOpen(false);
     setSearch("");
     setPage(1);
+  }
+
+  function openCampaignWorkspace(view: CampaignWorkspaceView, campaignName?: string) {
+    const campaign = campaignName ? displayCampaigns.find((item) => item.name === campaignName) : selectedCampaign;
+    if (campaign) {
+      setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false }));
+      setEmailCampaign(campaign.name);
+    }
+    setCampaignWorkspaceView(view);
+    setSelectedIds(new Set());
+    setBulkMode(null);
+    switchSection("campaigns");
   }
 
   function toggleSelected(id: string, checked: boolean) {
@@ -664,7 +696,7 @@ Please let me know a suitable time to connect.`,
               </section>
 
               <section className="panel recent-panel">
-                <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => switchSection("emails")}>View all {stats.emails} →</button></div>
+                <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => openCampaignWorkspace("overview")}>Open campaigns →</button></div>
                 <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact />
               </section>
             </>
@@ -681,6 +713,20 @@ Please let me know a suitable time to connect.`,
                 <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>
               </article>
 
+              <article className="panel campaign-workspace-switcher">
+                <div>
+                  <p className="eyebrow">Campaign workspace</p>
+                  <label><span>Working campaign</span><select value={selectedCampaignSummary?.id || ""} onChange={(event) => { const campaign = displayCampaigns.find((item) => item.id === event.target.value); setQueueForm((current) => ({ ...current, campaignId: event.target.value, confirmed: false })); if (campaign) setEmailCampaign(campaign.name); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>{displayCampaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}</select></label>
+                </div>
+                <div className="campaign-workspace-tabs" role="tablist" aria-label="Campaign workspace views">
+                  <button className={campaignWorkspaceView === "overview" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "overview"} onClick={() => { setCampaignWorkspaceView("overview"); setPage(1); }}>Overview</button>
+                  <button className={campaignWorkspaceView === "emails" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "emails"} onClick={() => { setCampaignWorkspaceView("emails"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Emails <span>{selectedCampaignSummary?.total || 0}</span></button>
+                  <button className={campaignWorkspaceView === "delivery" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "delivery"} onClick={() => { setCampaignWorkspaceView("delivery"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Approval & delivery</button>
+                </div>
+              </article>
+
+              {campaignWorkspaceView === "overview" && (
+                <>
               <section className="campaign-portfolio-metrics" aria-label="Campaign status totals">
                 <button className={campaignStatusFilter === "all" ? "active" : ""} onClick={() => setCampaignStatusFilter("all")}><span>All campaigns</span><strong>{campaignPortfolioStats.total}</strong><small>Complete portfolio</small></button>
                 <button className={campaignStatusFilter === "draft_pending_review" ? "active" : ""} onClick={() => setCampaignStatusFilter("draft_pending_review")}><span>Draft</span><strong>{campaignPortfolioStats.draft}</strong><small>Needs review</small></button>
@@ -749,17 +795,103 @@ Please let me know a suitable time to connect.`,
                     </div>
 
                     <div className="campaign-audience-preview">
-                      <div><p className="eyebrow">Audience preview</p><button onClick={() => { setEmailCampaign(selectedCampaignSummary.name); switchSection("emails"); }}>View all emails</button></div>
+                      <div><p className="eyebrow">Audience preview</p><button onClick={() => openCampaignWorkspace("emails", selectedCampaignSummary.name)}>View all emails</button></div>
                       {selectedCampaignSummary.emails.slice(0, 5).map((email) => <span key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></span>)}
                     </div>
 
                     <div className="campaign-detail-actions">
-                      <button onClick={() => { setEmailCampaign(selectedCampaignSummary.name); switchSection("emails"); }}>Review emails</button>
-                      <button className="primary-action" onClick={() => switchSection("queue")}>Manage approval & schedule</button>
+                      <button onClick={() => openCampaignWorkspace("emails", selectedCampaignSummary.name)}>Review emails</button>
+                      <button className="primary-action" onClick={() => openCampaignWorkspace("delivery", selectedCampaignSummary.name)}>Manage approval & schedule</button>
                     </div>
                   </article>
                 )}
               </section>
+                </>
+              )}
+
+              {campaignWorkspaceView === "emails" && selectedCampaignSummary && (
+                <section className="panel data-panel campaign-email-workspace">
+                  <div className="panel-heading filters-heading">
+                    <div><p className="eyebrow">Campaign emails</p><h2>{selectedCampaignSummary.name}</h2><p className="section-helper">{campaignEmailRows.length} emails in this campaign. Preview, test, approve, schedule, or send only the selected records.</p></div>
+                    <div className="email-filter-group single-filter">
+                      <label><span>Status</span><select value={emailStatus} onChange={(event) => { setEmailStatus(event.target.value); setSelectedIds(new Set()); setPage(1); }} aria-label="Filter campaign emails by status"><option value="all">All statuses</option><option value="draft">Needs review</option><option value="failed">Failed</option><option value="sent">Sent</option></select></label>
+                    </div>
+                  </div>
+                  <div className="selection-toolbar">
+                    <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? paused ? "Review and test copies are available; client delivery is paused" : "Ready for review, testing, or delivery" : "Select campaign emails using the checkboxes"}</span></div>
+                    <div>
+                      <button disabled={!selectedIds.size || !control?.canManage || working} onClick={() => runAction({ action: "approve_batch", emailIds: [...selectedIds] }, `${selectedIds.size} campaign emails approved. Nothing has been sent.`)}>Approve</button>
+                      <button className="test-action" disabled={!selectedIds.size || selectedIds.size > 5 || !control?.canManage || working} onClick={() => setBulkMode("test")} title={selectedIds.size > 5 ? "Select up to 5 drafts for a test" : ""}>Send test copy</button>
+                      <button className="primary-action" disabled={!selectedIds.size || selectedCampaignUnapproved > 0 || selectedIds.size > 50 || paused || !control?.canManage || working} onClick={() => setBulkMode("schedule")} title={selectedCampaignUnapproved ? "Approve every selected email before scheduling" : paused ? "Turn off Pause all before scheduling" : selectedIds.size > 50 ? "Schedule up to 50 emails at a time" : ""}>Schedule selected</button>
+                      <button className="send-action" disabled={!selectedIds.size || selectedCampaignUnapproved > 0 || selectedIds.size > 25 || paused || !control?.canManage || working} onClick={() => setBulkMode("send")} title={selectedCampaignUnapproved ? "Approve every selected email before sending" : paused ? "Turn off Pause all before sending" : selectedIds.size > 25 ? "Send up to 25 emails at a time" : ""}>Send selected now</button>
+                      {selectedIds.size > 0 && <button className="quiet-action" onClick={() => setSelectedIds(new Set())}>Clear</button>}
+                    </div>
+                  </div>
+                  {bulkMode === "schedule" && (
+                    <div className="bulk-panel">
+                      <div><p className="eyebrow">Automatic delivery</p><h3>Schedule {selectedIds.size} campaign emails</h3><p>Brevo will deliver these messages after the dashboard is closed.</p></div>
+                      <label>First email time<input type="datetime-local" value={bulkForm.scheduledFor} onChange={(event) => setBulkForm({ ...bulkForm, scheduledFor: event.target.value })} /></label>
+                      <label>Spacing between emails<select value={bulkForm.delayMinutes} onChange={(event) => setBulkForm({ ...bulkForm, delayMinutes: Number(event.target.value) })}><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select></label>
+                      <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(event) => setBulkForm({ ...bulkForm, confirmed: event.target.checked })} /><span>I reviewed these campaign recipients and approve automatic delivery.</span></label>
+                      <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="primary-action" disabled={!bulkForm.scheduledFor || !bulkForm.confirmed || paused || working} onClick={runBulkSchedule}>{working ? "Scheduling…" : "Confirm schedule"}</button></div>
+                    </div>
+                  )}
+                  {bulkMode === "send" && (
+                    <div className="bulk-panel danger-panel">
+                      <div><p className="eyebrow">Immediate campaign send</p><h3>Send {selectedIds.size} selected emails now</h3><p>This action cannot be undone. Type <strong>SEND</strong> to confirm.</p></div>
+                      <label>Confirmation<input value={bulkForm.confirmText} onChange={(event) => setBulkForm({ ...bulkForm, confirmText: event.target.value.toUpperCase() })} placeholder="Type SEND" /></label>
+                      <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="danger-action" disabled={bulkForm.confirmText !== "SEND" || paused || working} onClick={runBulkSend}>{working ? "Sending…" : "Send now"}</button></div>
+                    </div>
+                  )}
+                  {bulkMode === "test" && (
+                    <div className="bulk-panel test-panel">
+                      <div><p className="eyebrow">Inbox preview</p><h3>Send {selectedIds.size} campaign email{selectedIds.size === 1 ? "" : "s"} as a test</h3><p>Only the test inbox below receives these copies. Original recipients and draft statuses remain unchanged.</p></div>
+                      <label className="test-recipient-field"><span>Send test to</span><input type="email" value={bulkForm.testRecipients} onChange={(event) => setBulkForm({ ...bulkForm, testRecipients: event.target.value })} placeholder="Enter your email address" autoComplete="email" /></label>
+                      <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(event) => setBulkForm({ ...bulkForm, confirmed: event.target.checked })} /><span>I confirm this is my test inbox.</span></label>
+                      <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
+                    </div>
+                  )}
+                  <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
+                  <div className="pagination"><span>Page {page} of {campaignEmailPages}</span><div><button disabled={page === 1} onClick={() => setPage((current) => current - 1)}>Previous</button><button disabled={page === campaignEmailPages} onClick={() => setPage((current) => current + 1)}>Next</button></div></div>
+                </section>
+              )}
+
+              {campaignWorkspaceView === "delivery" && selectedCampaign && (
+                <section className="campaign-queue campaign-delivery-workspace">
+                  <article className="panel campaign-workspace">
+                    <div className="campaign-workspace-header">
+                      <div><p className="eyebrow">Campaign approval & delivery</p><h2>{selectedCampaign.name}</h2><p>Review the audience, approve every draft, then schedule this campaign as one controlled operation.</p></div>
+                      <div className="campaign-stat-strip"><span><b>{selectedCampaignEmails.length}</b>Recipients</span><span><b>{selectedCampaignDrafts}</b>Needs review</span><span><b>{selectedCampaignApproved}</b>Approved</span><span><b>{selectedCampaignScheduled}</b>Scheduled</span><span><b>{selectedCampaignSent}</b>Sent</span></div>
+                    </div>
+                    <div className="campaign-process">
+                      <section>
+                        <div className="campaign-step-heading"><span>1</span><div><strong>Review campaign audience</strong><p>All recipients below belong only to this selected campaign.</p></div></div>
+                        <div className="campaign-recipient-list">
+                          {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></div>)}
+                          {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => setCampaignWorkspaceView("emails")}>Review all {selectedCampaignEmails.length} campaign emails →</button>}
+                        </div>
+                      </section>
+                      <section>
+                        <div className="campaign-step-heading"><span>2</span><div><strong>Approve the campaign</strong><p>Approval changes draft status only. It never sends an email.</p></div></div>
+                        <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span></div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
+                      </section>
+                      <section className="campaign-schedule-section">
+                        <div className="campaign-step-heading"><span>3</span><div><strong>Schedule automatic delivery</strong><p>Brevo stores the campaign schedule and continues when this dashboard is closed.</p></div></div>
+                        <div className="campaign-schedule-form">
+                          <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
+                          <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
+                          <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
+                          <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
+                        </div>
+                      </section>
+                    </div>
+                  </article>
+                  <article className="panel scheduled-campaigns">
+                    <div className="panel-heading"><div><p className="eyebrow">24/7 Brevo delivery</p><h2>Scheduled campaign activity</h2><p className="section-helper">Server-owned schedules continue while nobody is signed in.</p></div><span>{scheduledCampaignGroups.length} active</span></div>
+                    <div className="scheduled-campaign-list">{scheduledCampaignGroups.length ? scheduledCampaignGroups.map((item) => <div key={item.id}><span className="campaign-symbol">{item.name.slice(0, 2).toUpperCase()}</span><div><strong>{item.name}</strong><small>{item.count} emails · {item.first ? `starts ${new Date(item.first).toLocaleString("en-IN")}` : "start pending"}{item.last && item.last !== item.first ? ` · ends ${new Date(item.last).toLocaleString("en-IN")}` : ""}</small></div><StatusPill value="scheduled" /></div>) : <div className="empty-state">No campaigns are scheduled yet.</div>}</div>
+                  </article>
+                </section>
+              )}
             </section>
           )}
 
@@ -862,7 +994,7 @@ Please let me know a suitable time to connect.`,
 
               {intakeResults.length > 0 && (
                 <section className="panel research-results">
-                  <div className="panel-heading"><div><p className="eyebrow">Research output</p><h2>{intakeResults.filter((item) => item.ok).length} drafts created</h2></div><button className="text-button" onClick={() => switchSection("emails")}>Review in Emails →</button></div>
+                  <div className="panel-heading"><div><p className="eyebrow">Research output</p><h2>{intakeResults.filter((item) => item.ok).length} drafts created</h2></div><button className="text-button" onClick={() => openCampaignWorkspace("emails", intakeForm.campaignName)}>Review campaign emails →</button></div>
                   <div className="result-grid">{intakeResults.map((item, index) => <article key={`${item.email}-${index}`} className={item.ok ? "result-card" : "result-card failed"}><div><strong>{item.company || item.email}</strong><span>{item.email}</span></div><StatusPill value={item.ok ? "draft_pending_review" : "send_failed"} />{item.ok ? <><p>{item.researchSummary || "Company information saved from its domain and supplied context."}</p><small>Greeting: Dear {item.name || "Sir/Madam"}</small></> : <p>{item.error}</p>}</article>)}</div>
                 </section>
               )}
@@ -895,7 +1027,7 @@ Please let me know a suitable time to connect.`,
                       <div className="campaign-step-heading"><span>1</span><div><strong>Review campaign audience</strong><p>Client names remain inside this campaign—there is no long single-email dropdown.</p></div></div>
                       <div className="campaign-recipient-list">
                         {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></div>)}
-                        {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => { setEmailCampaign(selectedCampaign.name); switchSection("emails"); }}>View all {selectedCampaignEmails.length} recipients in Emails →</button>}
+                        {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => openCampaignWorkspace("emails", selectedCampaign.name)}>View all {selectedCampaignEmails.length} campaign emails →</button>}
                       </div>
                     </section>
 

@@ -559,6 +559,19 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .scheduled-campaign-list small { color: var(--muted); line-height: 1.4; }
 
 .campaigns-hub { display: grid; gap: 18px; }
+.campaign-workspace-switcher { min-height: 94px; padding: 17px 20px; display: flex; align-items: center; justify-content: space-between; gap: 22px; }
+.campaign-workspace-switcher > div:first-child { min-width: 280px; display: grid; gap: 4px; }
+.campaign-workspace-switcher label { display: grid; grid-template-columns: auto minmax(220px, 1fr); align-items: center; gap: 11px; }
+.campaign-workspace-switcher label > span { color: var(--muted); font-size: 13px; font-weight: 700; }
+.campaign-workspace-switcher select { min-height: 43px; padding: 8px 34px 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font-size: 14px; }
+.campaign-workspace-tabs { padding: 5px; border: 1px solid var(--line); border-radius: 12px; background: #f5f6f8; display: flex; gap: 4px; }
+.campaign-workspace-tabs button { min-height: 42px; padding: 8px 16px; border: 0; border-radius: 9px; background: transparent; color: #68717b; font-weight: 800; white-space: nowrap; }
+.campaign-workspace-tabs button:hover { color: var(--ink); background: #fff; }
+.campaign-workspace-tabs button.active { background: #fff; color: var(--accent); box-shadow: 0 3px 12px rgba(28, 35, 43, .1); }
+.campaign-workspace-tabs button span { min-width: 24px; margin-left: 5px; padding: 2px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
+.campaign-email-workspace { overflow: visible; }
+.email-filter-group.single-filter { grid-template-columns: minmax(180px, 230px); }
+.campaign-delivery-workspace { gap: 18px; }
 .campaign-portfolio-hero { min-height: 138px; padding: 26px 28px; display: flex; align-items: center; justify-content: space-between; gap: 24px; background: linear-gradient(135deg, #fff 0%, #f7f5ff 100%); }
 .campaign-portfolio-hero > div { max-width: 760px; }
 .campaign-portfolio-hero h2 { margin: 4px 0 9px; font-size: 27px; }
@@ -641,6 +654,9 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
   .campaign-stat-strip { width: 100%; }
   .campaign-portfolio-layout { grid-template-columns: 1fr; }
   .campaign-detail-panel { position: static; }
+  .campaign-workspace-switcher { align-items: stretch; flex-direction: column; }
+  .campaign-workspace-tabs { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .campaign-workspace-tabs button { white-space: normal; }
 }
 
 @media (max-width: 900px) {
@@ -713,6 +729,10 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
   .campaign-schedule-button { width: 100%; min-width: 0; }
   .campaign-portfolio-hero { align-items: stretch; flex-direction: column; }
   .campaign-portfolio-hero button { width: 100%; }
+  .campaign-workspace-switcher { padding: 15px; }
+  .campaign-workspace-switcher > div:first-child { min-width: 0; }
+  .campaign-workspace-switcher label { grid-template-columns: 1fr; }
+  .campaign-workspace-tabs { grid-template-columns: 1fr; }
   .campaign-portfolio-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .campaign-safety-note { grid-template-columns: auto minmax(0, 1fr); }
   .campaign-safety-note button { grid-column: 1 / -1; width: 100%; }

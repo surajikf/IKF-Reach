@@ -385,6 +385,9 @@ export async function POST(req: NextRequest) {
       const mails = await db(`generated_emails?select=*&id=eq.${body.emailId}&limit=1`);
       const mail = mails[0];
       if (!mail) return NextResponse.json({ ok: false, error: "Email draft not found." }, { status: 404 });
+      if (mail.status !== "approved") {
+        return NextResponse.json({ ok: false, error: "Approve this email before scheduling." }, { status: 409 });
+      }
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
       const result = await submitBrevo(mail, contact, scheduledAt.toISOString());
@@ -426,6 +429,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: `Keep the full batch inside the ${windowStart}–${windowEnd} Asia/Kolkata sending window.` }, { status: 400 });
       }
       const mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
+      if (mails.some((mail: Record<string, any>) => mail.status !== "approved")) {
+        return NextResponse.json({ ok: false, error: "Approve every selected email before scheduling." }, { status: 409 });
+      }
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
@@ -609,6 +615,7 @@ export async function POST(req: NextRequest) {
       const mails = await db(`generated_emails?select=*&id=eq.${body.emailId}&limit=1`);
       const mail = mails[0];
       if (!mail) return NextResponse.json({ ok: false, error: "Email draft not found." }, { status: 404 });
+      if (mail.status !== "approved") return NextResponse.json({ ok: false, error: "Approve this email before sending." }, { status: 409 });
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
       if (!contact?.email) return NextResponse.json({ ok: false, error: "The selected draft has no valid recipient." }, { status: 400 });
@@ -670,6 +677,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” first." }, { status: 409 });
       }
       const mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
+      if (mails.some((mail: Record<string, any>) => mail.status !== "approved")) {
+        return NextResponse.json({ ok: false, error: "Approve every selected email before sending." }, { status: 409 });
+      }
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
