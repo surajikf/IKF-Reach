@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import data from "./dashboard-data.json";
 
-type Section = "overview" | "create" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
+type Section = "overview" | "create" | "campaigns" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
 type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null };
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
@@ -33,6 +33,7 @@ type ControlData = {
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
   { id: "create", label: "Create outreach", icon: "+" },
+  { id: "campaigns", label: "Campaigns", icon: "▦" },
   { id: "emails", label: "Emails", icon: "✉" },
   { id: "queue", label: "Approval queue", icon: "✓" },
   { id: "contacts", label: "Contacts", icon: "◎" },
@@ -48,6 +49,12 @@ const statusLabel: Record<string, string> = {
   failed_insufficient_credits: "Failed",
   not_sent_insufficient_credits: "Not sent",
   active: "Active",
+  approved: "Ready",
+  scheduled: "Scheduled",
+  running: "Running",
+  completed: "Sent",
+  needs_attention: "Needs attention",
+  empty: "Empty",
   paused_no_credits: "Paused",
   paused_user_hold: "On hold",
 };
@@ -59,7 +66,7 @@ function prettyStatus(value?: string | null) {
 
 function statusTone(value?: string | null) {
   if (!value || value.includes("draft") || value.includes("review")) return "review";
-  if (value === "sent" || value === "active" || value === "delivered") return "good";
+  if (value === "sent" || value === "active" || value === "delivered" || value === "completed") return "good";
   if (value.includes("fail") || value.includes("not_sent")) return "bad";
   return "neutral";
 }
@@ -192,6 +199,7 @@ Please let me know a suitable time to connect.`,
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", delayMinutes: 5, confirmed: false });
+  const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
   const pageSize = 20;
 
   async function loadControl() {
@@ -272,6 +280,57 @@ Please let me know a suitable time to connect.`,
     }
     return [...groups.values()];
   }, [control?.queue, displayCampaigns]);
+  const campaignSummaries = useMemo(() => displayCampaigns.map((campaign) => {
+    const emails = displayEmails.filter((email) => email.campaign === campaign.name);
+    const needsReview = emails.filter((email) => email.status === "draft_pending_review").length;
+    const approved = emails.filter((email) => email.status === "approved").length;
+    const scheduled = emails.filter((email) => email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")).length;
+    const sent = emails.filter((email) => email.status === "sent" || email.sendStatus === "sent").length;
+    const failed = emails.filter((email) => String(email.sendStatus || email.status).includes("fail") || String(email.sendStatus || email.status).includes("not_sent")).length;
+    const latestGeneratedAt = emails.reduce<string | null>((latest, email) => !latest || email.generatedAt > latest ? email.generatedAt : latest, null);
+    const queued = scheduledCampaignGroups.find((item) => item.id === campaign.id);
+    let lifecycle = "empty";
+    if (failed > 0) lifecycle = "needs_attention";
+    else if (sent > 0 && sent < emails.length) lifecycle = "running";
+    else if (emails.length > 0 && sent === emails.length) lifecycle = "completed";
+    else if (scheduled > 0) lifecycle = "scheduled";
+    else if (approved > 0) lifecycle = "approved";
+    else if (needsReview > 0) lifecycle = "draft_pending_review";
+    const progressed = sent + scheduled;
+    return {
+      ...campaign,
+      emails,
+      total: emails.length,
+      needsReview,
+      approved,
+      scheduled,
+      sent,
+      failed,
+      lifecycle,
+      progress: emails.length ? Math.round((progressed / emails.length) * 100) : 0,
+      latestGeneratedAt,
+      firstScheduledAt: queued?.first || null,
+      lastScheduledAt: queued?.last || null,
+    };
+  }), [displayCampaigns, displayEmails, scheduledCampaignGroups]);
+  const selectedCampaignSummary = campaignSummaries.find((campaign) => campaign.id === queueForm.campaignId) || campaignSummaries[0];
+  const filteredCampaigns = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return campaignSummaries.filter((campaign) => {
+      const matchesTerm = !term || `${campaign.name} ${campaign.senderName} ${campaign.senderEmail}`.toLowerCase().includes(term);
+      const matchesStatus = campaignStatusFilter === "all" ||
+        (campaignStatusFilter === "active" && ["approved", "scheduled", "running"].includes(campaign.lifecycle)) ||
+        campaign.lifecycle === campaignStatusFilter;
+      return matchesTerm && matchesStatus;
+    });
+  }, [campaignSummaries, campaignStatusFilter, search]);
+  const campaignPortfolioStats = useMemo(() => ({
+    total: campaignSummaries.length,
+    draft: campaignSummaries.filter((campaign) => campaign.lifecycle === "draft_pending_review").length,
+    active: campaignSummaries.filter((campaign) => ["approved", "scheduled", "running"].includes(campaign.lifecycle)).length,
+    sent: campaignSummaries.filter((campaign) => campaign.lifecycle === "completed").length,
+    attention: campaignSummaries.filter((campaign) => campaign.lifecycle === "needs_attention").length,
+  }), [campaignSummaries]);
   const filteredEmails = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayEmails.filter((email) => {
@@ -579,6 +638,99 @@ Please let me know a suitable time to connect.`,
                 <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact />
               </section>
             </>
+          )}
+
+          {section === "campaigns" && (
+            <section className="campaigns-hub">
+              <article className="panel campaign-portfolio-hero">
+                <div>
+                  <p className="eyebrow">Campaign portfolio</p>
+                  <h2>Every outreach campaign in one place</h2>
+                  <p>See what is still being drafted, ready for approval, scheduled, running, sent, or needs attention.</p>
+                </div>
+                <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>
+              </article>
+
+              <section className="campaign-portfolio-metrics" aria-label="Campaign status totals">
+                <button className={campaignStatusFilter === "all" ? "active" : ""} onClick={() => setCampaignStatusFilter("all")}><span>All campaigns</span><strong>{campaignPortfolioStats.total}</strong><small>Complete portfolio</small></button>
+                <button className={campaignStatusFilter === "draft_pending_review" ? "active" : ""} onClick={() => setCampaignStatusFilter("draft_pending_review")}><span>Draft</span><strong>{campaignPortfolioStats.draft}</strong><small>Needs review</small></button>
+                <button className={campaignStatusFilter === "active" ? "active" : ""} onClick={() => setCampaignStatusFilter("active")}><span>Active</span><strong>{campaignPortfolioStats.active}</strong><small>Ready or running</small></button>
+                <button className={campaignStatusFilter === "completed" ? "active" : ""} onClick={() => setCampaignStatusFilter("completed")}><span>Sent</span><strong>{campaignPortfolioStats.sent}</strong><small>Fully completed</small></button>
+                <button className={campaignStatusFilter === "needs_attention" ? "active" : ""} onClick={() => setCampaignStatusFilter("needs_attention")}><span>Attention</span><strong>{campaignPortfolioStats.attention}</strong><small>Delivery issues</small></button>
+              </section>
+
+              {paused && (
+                <section className="campaign-safety-note">
+                  <span>!</span>
+                  <div><strong>Client sending is globally paused</strong><p>Campaign preparation and review remain available. No campaign can start until Pause all is turned off in Controls & APIs.</p></div>
+                  <button onClick={() => switchSection("settings")}>View controls</button>
+                </section>
+              )}
+
+              <section className="campaign-portfolio-layout">
+                <article className="panel campaign-directory">
+                  <div className="panel-heading">
+                    <div><p className="eyebrow">Campaign directory</p><h2>{filteredCampaigns.length} campaigns</h2></div>
+                    <label className="campaign-status-select"><span>Status</span><select value={campaignStatusFilter} onChange={(event) => setCampaignStatusFilter(event.target.value)}><option value="all">All statuses</option><option value="draft_pending_review">Draft</option><option value="active">Active</option><option value="approved">Ready</option><option value="scheduled">Scheduled</option><option value="running">Running</option><option value="completed">Sent</option><option value="needs_attention">Needs attention</option></select></label>
+                  </div>
+                  <div className="campaign-directory-list">
+                    {filteredCampaigns.map((campaign) => (
+                      <button key={campaign.id} className={selectedCampaignSummary?.id === campaign.id ? "campaign-directory-row active" : "campaign-directory-row"} onClick={() => setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false }))}>
+                        <span className="campaign-symbol">{campaign.name.slice(0, 2).toUpperCase()}</span>
+                        <span className="campaign-directory-copy"><strong>{campaign.name}</strong><small>{campaign.total} recipients · Updated {compactDate(campaign.latestGeneratedAt)}</small><i><b style={{ width: `${campaign.progress}%` }} /></i></span>
+                        <span className="campaign-directory-result"><StatusPill value={campaign.lifecycle} /><small>{campaign.progress}% delivered or scheduled</small></span>
+                        <span className="campaign-row-arrow">→</span>
+                      </button>
+                    ))}
+                    {!filteredCampaigns.length && <div className="empty-state">No campaigns match this status or search.</div>}
+                  </div>
+                </article>
+
+                {selectedCampaignSummary && (
+                  <article className="panel campaign-detail-panel">
+                    <div className="campaign-detail-heading">
+                      <div className="campaign-symbol">{selectedCampaignSummary.name.slice(0, 2).toUpperCase()}</div>
+                      <div><p className="eyebrow">Selected campaign</p><h2>{selectedCampaignSummary.name}</h2><span>{selectedCampaignSummary.senderName} · {selectedCampaignSummary.senderEmail}</span></div>
+                      <StatusPill value={selectedCampaignSummary.lifecycle} />
+                    </div>
+
+                    <div className="campaign-detail-progress">
+                      <div><span>Campaign progress</span><strong>{selectedCampaignSummary.progress}%</strong></div>
+                      <i><b style={{ width: `${selectedCampaignSummary.progress}%` }} /></i>
+                    </div>
+
+                    <div className="campaign-detail-stats">
+                      <span><b>{selectedCampaignSummary.total}</b>Recipients</span>
+                      <span><b>{selectedCampaignSummary.needsReview}</b>Draft</span>
+                      <span><b>{selectedCampaignSummary.approved}</b>Ready</span>
+                      <span><b>{selectedCampaignSummary.scheduled}</b>Scheduled</span>
+                      <span><b>{selectedCampaignSummary.sent}</b>Sent</span>
+                      <span><b>{selectedCampaignSummary.failed}</b>Failed</span>
+                    </div>
+
+                    <div className="campaign-lifecycle">
+                      <p className="eyebrow">Lifecycle</p>
+                      <ol>
+                        <li className={selectedCampaignSummary.total ? "complete" : ""}><span>1</span><div><strong>Drafts created</strong><small>{selectedCampaignSummary.total} personalized emails</small></div></li>
+                        <li className={selectedCampaignSummary.approved + selectedCampaignSummary.scheduled + selectedCampaignSummary.sent > 0 ? "complete" : ""}><span>2</span><div><strong>Reviewed and approved</strong><small>{selectedCampaignSummary.approved + selectedCampaignSummary.scheduled + selectedCampaignSummary.sent} ready or progressed</small></div></li>
+                        <li className={selectedCampaignSummary.scheduled + selectedCampaignSummary.sent > 0 ? "complete" : ""}><span>3</span><div><strong>Scheduled with Brevo</strong><small>{selectedCampaignSummary.firstScheduledAt ? `Starts ${new Date(selectedCampaignSummary.firstScheduledAt).toLocaleString("en-IN")}` : "Not scheduled yet"}</small></div></li>
+                        <li className={selectedCampaignSummary.sent === selectedCampaignSummary.total && selectedCampaignSummary.total > 0 ? "complete" : ""}><span>4</span><div><strong>Delivery completed</strong><small>{selectedCampaignSummary.sent} of {selectedCampaignSummary.total} sent</small></div></li>
+                      </ol>
+                    </div>
+
+                    <div className="campaign-audience-preview">
+                      <div><p className="eyebrow">Audience preview</p><button onClick={() => { setEmailCampaign(selectedCampaignSummary.name); switchSection("emails"); }}>View all emails</button></div>
+                      {selectedCampaignSummary.emails.slice(0, 5).map((email) => <span key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></span>)}
+                    </div>
+
+                    <div className="campaign-detail-actions">
+                      <button onClick={() => { setEmailCampaign(selectedCampaignSummary.name); switchSection("emails"); }}>Review emails</button>
+                      <button className="primary-action" onClick={() => switchSection("queue")}>Manage approval & schedule</button>
+                    </div>
+                  </article>
+                )}
+              </section>
+            </section>
           )}
 
           {section === "emails" && (
