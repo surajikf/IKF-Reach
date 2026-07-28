@@ -172,7 +172,6 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
   const [noticeTone, setNoticeTone] = useState<"success" | "error">("success");
-  const [listeningField, setListeningField] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkMode, setBulkMode] = useState<"schedule" | "send" | "test" | null>(null);
   const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
@@ -192,7 +191,7 @@ Please let me know a suitable time to connect.`,
   });
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
-  const [queueForm, setQueueForm] = useState({ emailId: data.emails[0]?.id || "", scheduledFor: "", confirmed: false });
+  const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", delayMinutes: 5, confirmed: false });
   const pageSize = 20;
 
   async function loadControl() {
@@ -245,12 +244,34 @@ Please let me know a suitable time to connect.`,
   }, [control?.liveStats]);
   const paused = control?.settings?.paused ?? true;
   const displayCampaigns = useMemo(() => control?.campaigns?.length ? control.campaigns.map((campaign) => ({
+    id: String(campaign.id || campaign.name),
     name: String(campaign.name || "Outreach"),
     status: paused ? "paused_user_hold" : String(campaign.status || "active"),
     drafts: displayEmails.filter((email) => email.campaign === campaign.name).length,
     senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
     senderEmail: String(campaign.sender_email || control.sender?.email || "tanishka@iknowai.in"),
-  })) : data.campaigns, [control?.campaigns, control?.sender, displayEmails, paused]);
+  })) : data.campaigns.map((campaign) => ({ ...campaign, id: campaign.name })), [control?.campaigns, control?.sender, displayEmails, paused]);
+  const selectedCampaign = displayCampaigns.find((campaign) => campaign.id === queueForm.campaignId) || displayCampaigns[0];
+  const selectedCampaignEmails = selectedCampaign ? displayEmails.filter((email) => email.campaign === selectedCampaign.name) : [];
+  const selectedCampaignDrafts = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review").length;
+  const selectedCampaignApproved = selectedCampaignEmails.filter((email) => email.status === "approved").length;
+  const selectedCampaignScheduled = selectedCampaignEmails.filter((email) => email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")).length;
+  const selectedCampaignSent = selectedCampaignEmails.filter((email) => email.status === "sent" || email.sendStatus === "sent").length;
+  const scheduledCampaignGroups = useMemo(() => {
+    const groups = new Map<string, { id: string; name: string; count: number; first: string | null; last: string | null }>();
+    for (const item of control?.queue || []) {
+      if (!String(item.status || "").includes("scheduled")) continue;
+      const campaign = displayCampaigns.find((entry) => entry.id === item.campaign_id);
+      const key = String(item.campaign_id || "unknown");
+      const time = item.scheduled_for ? String(item.scheduled_for) : null;
+      const current = groups.get(key) || { id: key, name: campaign?.name || "Campaign", count: 0, first: null, last: null };
+      current.count += 1;
+      if (time && (!current.first || time < current.first)) current.first = time;
+      if (time && (!current.last || time > current.last)) current.last = time;
+      groups.set(key, current);
+    }
+    return [...groups.values()];
+  }, [control?.queue, displayCampaigns]);
   const filteredEmails = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayEmails.filter((email) => {
@@ -274,10 +295,10 @@ Please let me know a suitable time to connect.`,
   }, [page, pages]);
 
   useEffect(() => {
-    if (displayEmails.length && !displayEmails.some((email) => email.id === queueForm.emailId)) {
-      setQueueForm((current) => ({ ...current, emailId: displayEmails[0].id }));
+    if (displayCampaigns.length && !displayCampaigns.some((campaign) => campaign.id === queueForm.campaignId)) {
+      setQueueForm((current) => ({ ...current, campaignId: displayCampaigns[0].id }));
     }
-  }, [displayEmails, queueForm.emailId]);
+  }, [displayCampaigns, queueForm.campaignId]);
 
   useEffect(() => {
     if (!selectedEmail && !selectedContact) return;
@@ -353,6 +374,37 @@ Please let me know a suitable time to connect.`,
     }
   }
 
+  async function approveSelectedCampaign() {
+    const ids = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review").map((email) => email.id);
+    if (!ids.length) {
+      setNoticeTone("success");
+      setNotice("Every draft in this campaign is already approved or scheduled.");
+      return;
+    }
+    await runAction({ action: "approve_batch", emailIds: ids }, `${ids.length} campaign drafts approved. Nothing has been sent.`);
+  }
+
+  async function scheduleSelectedCampaign() {
+    if (!selectedCampaign) return;
+    if (!queueForm.scheduledFor) {
+      setNoticeTone("error");
+      setNotice("Choose the campaign start date and time.");
+      return;
+    }
+    const result = await runAction({
+      action: "schedule_campaign",
+      campaignId: selectedCampaign.id,
+      scheduledFor: new Date(queueForm.scheduledFor).toISOString(),
+      delayMinutes: queueForm.delayMinutes,
+      confirm: queueForm.confirmed,
+    }, `${selectedCampaign.name} was handed to Brevo for automatic scheduled delivery.`);
+    if (result?.ok) {
+      setNoticeTone("success");
+      setNotice(`${result.scheduled} emails scheduled with Brevo${result.failed ? `; ${result.failed} need attention` : ""}. Delivery continues after the dashboard is closed.`);
+      setQueueForm((current) => ({ ...current, confirmed: false }));
+    }
+  }
+
   async function runIntelligenceStudio() {
     let document: Record<string, string> | undefined;
     if (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile) {
@@ -376,36 +428,6 @@ Please let me know a suitable time to connect.`,
     }
     const result = await runAction({ action: "research_batch", ...intakeForm, document }, "Research completed and personalized drafts were created for review.");
     if (result?.ok) setIntakeResults(result.results || []);
-  }
-
-  function startDictation(field: string, currentValue: string, update: (value: string) => void) {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setNoticeTone("error");
-      setNotice("Voice typing is not supported in this browser. On Windows, click the field and press Windows + H.");
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-IN";
-    recognition.interimResults = false;
-    recognition.continuous = false;
-    recognition.onstart = () => setListeningField(field);
-    recognition.onend = () => setListeningField("");
-    recognition.onerror = () => {
-      setListeningField("");
-      setNoticeTone("error");
-      setNotice("Voice typing could not start. Check microphone permission or use Windows + H.");
-    };
-    recognition.onresult = (event: any) => {
-      const transcript = String(event.results?.[0]?.[0]?.transcript || "").trim();
-      if (transcript) update(`${currentValue}${currentValue.trim() ? " " : ""}${transcript}`);
-    };
-    recognition.start();
-  }
-
-  function VoiceButton({ field, value, onChange, label }: { field: string; value: string; onChange: (value: string) => void; label: string }) {
-    const active = listeningField === field;
-    return <button type="button" className={`voice-button ${active ? "listening" : ""}`} onClick={() => startDictation(field, value, onChange)} aria-label={`Dictate ${label}`} title={active ? "Listening…" : `Speak ${label}`}>{active ? "●" : "🎙"}</button>;
   }
 
   function handleFileSelection(file: File | null) {
@@ -624,18 +646,18 @@ Please let me know a suitable time to connect.`,
                 </div>
                 <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio(); }}>
                   <div className="campaign-setup-grid">
-                    <label className="topic-field"><span>Campaign name</span><div className="voice-field"><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><VoiceButton field="campaignName" value={intakeForm.campaignName} onChange={(campaignName) => setIntakeForm((current) => ({ ...current, campaignName }))} label="campaign name" /></div><small>Every draft from this set stays together under this campaign.</small></label>
-                    <label className="topic-field"><span>Email topic</span><div className="voice-field"><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI-enabled manufacturing operations" /><VoiceButton field="topic" value={intakeForm.topic} onChange={(topic) => setIntakeForm((current) => ({ ...current, topic }))} label="email topic" /></div><small>Used to build each personalized subject line.</small></label>
+                    <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
+                    <label className="topic-field"><span>Email topic</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI-enabled manufacturing operations" /><small>Used to build each personalized subject line.</small></label>
                   </div>
-                  <label className="template-field"><span>Your email template</span><div className="voice-field voice-textarea"><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><VoiceButton field="emailTemplate" value={intakeForm.emailTemplate} onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))} label="email template" /></div><small>Personalization fields: <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. A researched opening is added automatically when your template does not use personalization fields.</small></label>
+                  <label className="template-field"><span>Your email template</span><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><small>Personalization fields: <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. A researched opening is added automatically when your template does not use personalization fields.</small></label>
                   <div className="source-grid">
                     <label className="source-card">
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
-                      <div className="voice-field voice-textarea"><textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} /><VoiceButton field="rawInput" value={intakeForm.rawInput} onChange={(rawInput) => setIntakeForm((current) => ({ ...current, rawInput }))} label="contact list" /></div>
+                      <textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
                     </label>
                     <label className="source-card">
                       <span className="source-icon">www</span><strong>Add company websites</strong><small>We inspect public home, about, and contact pages.</small>
-                      <div className="voice-field voice-textarea"><textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} /><VoiceButton field="websites" value={intakeForm.websites} onChange={(websites) => setIntakeForm((current) => ({ ...current, websites }))} label="company websites" /></div>
+                      <textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} />
                     </label>
                     <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
                       <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB</small>
@@ -643,7 +665,7 @@ Please let me know a suitable time to connect.`,
                       <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
                     </label>
                   </div>
-                  <label className="brief-field"><span>Optional context or instructions</span><div className="voice-field voice-textarea"><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /><VoiceButton field="brief" value={intakeForm.brief} onChange={(brief) => setIntakeForm((current) => ({ ...current, brief }))} label="campaign instructions" /></div></label>
+                  <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
                   <div className="studio-actions"><div><strong>Campaign draft workflow</strong><span>Drafts stay grouped under “{intakeForm.campaignName || "Untitled campaign"}”. Nothing is approved, scheduled, or sent automatically.</span></div><button className="primary-action" disabled={working || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Researching websites…" : "Create campaign drafts"}</button></div>
                 </form>
               </article>
@@ -666,18 +688,57 @@ Please let me know a suitable time to connect.`,
           )}
 
           {section === "queue" && (
-            <section className="workspace-grid">
-              <article className="panel control-card wide-card">
-                <div className="panel-heading"><div><p className="eyebrow">Approval workflow</p><h2>Approve, schedule, or send</h2></div><span>{control?.queue?.length || 0} queued</span></div>
-                <div className="control-form compact-form">
-                  <label className="full-field">Choose generated email<select value={queueForm.emailId} onChange={(e) => setQueueForm({ ...queueForm, emailId: e.target.value })}>{displayEmails.map((email) => <option key={email.id} value={email.id}>{email.company} — {email.recipient}</option>)}</select></label>
-                  <label>Schedule date and time<input type="datetime-local" value={queueForm.scheduledFor} onChange={(e) => setQueueForm({ ...queueForm, scheduledFor: e.target.value })} /></label>
-                  <div className="button-stack"><button disabled={working || !control?.canManage} onClick={() => runAction({ action: "approve", emailId: queueForm.emailId }, "Email approved. It has not been sent.")}>Approve draft</button><button disabled={working || paused || !control?.canManage || !queueForm.scheduledFor} onClick={() => runAction({ action: "schedule", emailId: queueForm.emailId, scheduledFor: new Date(queueForm.scheduledFor).toISOString() }, "Email added to the scheduled queue.")}>Schedule</button></div>
-                  <label className="confirm-box full-field"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(e) => setQueueForm({ ...queueForm, confirmed: e.target.checked })} /><span>{paused ? "Sending is paused. Turn off Pause all before using immediate send." : "I confirm that I want to send this one email now."}</span></label>
-                  <button className="danger-action full-field" disabled={working || paused || !queueForm.confirmed || !control?.canManage} onClick={() => runAction({ action: "send_now", emailId: queueForm.emailId, confirm: true }, "Brevo accepted the email. The database has been updated.")}>Send this email now</button>
+            <section className="campaign-queue">
+              <article className="panel campaign-picker">
+                <div className="panel-heading"><div><p className="eyebrow">Campaign control centre</p><h2>Choose a campaign</h2><p className="section-helper">Recipients, approvals, and schedules stay organized inside their campaign.</p></div><span>{displayCampaigns.length} campaigns</span></div>
+                <div className="campaign-picker-grid">
+                  {displayCampaigns.map((campaign) => {
+                    const emails = displayEmails.filter((email) => email.campaign === campaign.name);
+                    const scheduled = emails.filter((email) => email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")).length;
+                    const sent = emails.filter((email) => email.status === "sent" || email.sendStatus === "sent").length;
+                    return <button key={campaign.id} className={selectedCampaign?.id === campaign.id ? "campaign-choice active" : "campaign-choice"} onClick={() => setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false }))}><span className="campaign-symbol">{campaign.name.slice(0, 2).toUpperCase()}</span><div><strong>{campaign.name}</strong><small>{emails.length} recipients · {scheduled} scheduled · {sent} sent</small></div><i>→</i></button>;
+                  })}
                 </div>
               </article>
-              <article className="panel control-card"><p className="eyebrow">Scheduled queue</p><h2>Upcoming sends</h2><div className="mini-list">{control?.queue?.length ? control.queue.slice(0, 8).map((item) => <div key={item.id}><span><strong>{String(item.status)}</strong><small>{item.scheduled_for ? new Date(String(item.scheduled_for)).toLocaleString("en-IN") : "Awaiting time"}</small></span>{String(item.status).includes("scheduled") && <button disabled={!control?.canManage || working} onClick={() => runAction({ action: "cancel_scheduled", queueId: item.id }, "Scheduled email cancelled.")}>Cancel</button>}</div>) : <p className="muted-copy">No emails are scheduled.</p>}</div></article>
+
+              {selectedCampaign && (
+                <article className="panel campaign-workspace">
+                  <div className="campaign-workspace-header">
+                    <div><p className="eyebrow">Selected campaign</p><h2>{selectedCampaign.name}</h2><p>Review the audience, approve the drafts, then choose when Brevo should begin automatic delivery.</p></div>
+                    <div className="campaign-stat-strip"><span><b>{selectedCampaignEmails.length}</b>Recipients</span><span><b>{selectedCampaignDrafts}</b>Needs review</span><span><b>{selectedCampaignApproved}</b>Approved</span><span><b>{selectedCampaignScheduled}</b>Scheduled</span><span><b>{selectedCampaignSent}</b>Sent</span></div>
+                  </div>
+
+                  <div className="campaign-process">
+                    <section>
+                      <div className="campaign-step-heading"><span>1</span><div><strong>Review campaign audience</strong><p>Client names remain inside this campaign—there is no long single-email dropdown.</p></div></div>
+                      <div className="campaign-recipient-list">
+                        {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></div>)}
+                        {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => { setEmailCampaign(selectedCampaign.name); switchSection("emails"); }}>View all {selectedCampaignEmails.length} recipients in Emails →</button>}
+                      </div>
+                    </section>
+
+                    <section>
+                      <div className="campaign-step-heading"><span>2</span><div><strong>Approve the campaign</strong><p>Approval only changes draft status. It does not send or schedule anything.</p></div></div>
+                      <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span></div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
+                    </section>
+
+                    <section className="campaign-schedule-section">
+                      <div className="campaign-step-heading"><span>3</span><div><strong>Schedule automatic delivery</strong><p>Brevo stores the schedule and sends while this dashboard and your computer are closed.</p></div></div>
+                      <div className="campaign-schedule-form">
+                        <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
+                        <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
+                        <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is currently active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery even after this dashboard is closed."}</small></span></label>
+                        <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
+                      </div>
+                    </section>
+                  </div>
+                </article>
+              )}
+
+              <article className="panel scheduled-campaigns">
+                <div className="panel-heading"><div><p className="eyebrow">24/7 Brevo delivery</p><h2>Scheduled campaigns</h2><p className="section-helper">These schedules continue on Brevo’s servers when nobody is signed in.</p></div><span>{scheduledCampaignGroups.length} active</span></div>
+                <div className="scheduled-campaign-list">{scheduledCampaignGroups.length ? scheduledCampaignGroups.map((item) => <div key={item.id}><span className="campaign-symbol">{item.name.slice(0, 2).toUpperCase()}</span><div><strong>{item.name}</strong><small>{item.count} emails · {item.first ? `starts ${new Date(item.first).toLocaleString("en-IN")}` : "start pending"}{item.last && item.last !== item.first ? ` · ends ${new Date(item.last).toLocaleString("en-IN")}` : ""}</small></div><StatusPill value="scheduled" /></div>) : <div className="empty-state">No campaigns are scheduled yet.</div>}</div>
+              </article>
             </section>
           )}
 
@@ -710,7 +771,7 @@ Please let me know a suitable time to connect.`,
               <article className="panel settings-section">
                 <div className="settings-section-heading"><div><span className="settings-number">3</span><div><p className="eyebrow">Delivery guardrails</p><h2>Control when and how fast emails can send</h2><p>All times use Asia/Kolkata. These limits apply to client delivery, not test previews.</p></div></div></div>
                 <form className="safety-form" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}>
-                  <label><span>Daily sending limit</span><input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="200" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
+                  <label><span>Daily sending limit</span><input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="1000" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
                   <label><span>Minimum spacing</span><div className="input-suffix"><input disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" defaultValue={control?.settings?.minimum_delay_minutes || 5} /><b>minutes</b></div><small>Delay between consecutive emails</small></label>
                   <label><span>Sending starts</span><input disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /><small>Earliest allowed delivery</small></label>
                   <label><span>Sending ends</span><input disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /><small>Latest allowed delivery</small></label>
@@ -767,15 +828,15 @@ Please let me know a suitable time to connect.`,
             <div className="drawer-header"><div><p className="eyebrow">Database contact</p><h2>Edit contact details</h2><p>Changes update Supabase and appear across Contacts and Companies.</p></div><button type="button" onClick={() => setSelectedContact(null)} aria-label="Close contact editor">×</button></div>
             <form className="contact-editor-form" onSubmit={(event) => { event.preventDefault(); saveContact(); }}>
               <div className="contact-form-section"><div><strong>Person</strong><span>Use only information you know or have verified.</span></div>
-                <label><span>Full name</span><div className="voice-field"><input value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} placeholder="Leave blank to use Sir/Madam" /><VoiceButton field="contactName" value={contactForm.name} onChange={(name) => setContactForm((current) => ({ ...current, name }))} label="contact name" /></div></label>
+                <label><span>Full name</span><input value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} placeholder="Leave blank to use Sir/Madam" /></label>
                 <label><span>Email address</span><input required type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
-                <label><span>Job title or role</span><div className="voice-field"><input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} placeholder="Example: Marketing Director" /><VoiceButton field="contactRole" value={contactForm.role} onChange={(role) => setContactForm((current) => ({ ...current, role }))} label="job title" /></div></label>
+                <label><span>Job title or role</span><input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} placeholder="Example: Marketing Director" /></label>
               </div>
               <div className="contact-form-section"><div><strong>Organization</strong><span>Organization changes are shared with its other contacts.</span></div>
-                <label><span>Company or organization</span><div className="voice-field"><input required value={contactForm.company} onChange={(event) => setContactForm({ ...contactForm, company: event.target.value })} /><VoiceButton field="contactCompany" value={contactForm.company} onChange={(company) => setContactForm((current) => ({ ...current, company }))} label="company name" /></div></label>
-                <label><span>Industry</span><div className="voice-field"><input value={contactForm.industry} onChange={(event) => setContactForm({ ...contactForm, industry: event.target.value })} placeholder="Example: Automotive manufacturing" /><VoiceButton field="contactIndustry" value={contactForm.industry} onChange={(industry) => setContactForm((current) => ({ ...current, industry }))} label="industry" /></div></label>
+                <label><span>Company or organization</span><input required value={contactForm.company} onChange={(event) => setContactForm({ ...contactForm, company: event.target.value })} /></label>
+                <label><span>Industry</span><input value={contactForm.industry} onChange={(event) => setContactForm({ ...contactForm, industry: event.target.value })} placeholder="Example: Automotive manufacturing" /></label>
                 <label><span>Website</span><input type="url" value={contactForm.website} onChange={(event) => setContactForm({ ...contactForm, website: event.target.value })} placeholder="https://company.com" /></label>
-                <label><span>Country</span><div className="voice-field"><input value={contactForm.country} onChange={(event) => setContactForm({ ...contactForm, country: event.target.value })} placeholder="Example: India" /><VoiceButton field="contactCountry" value={contactForm.country} onChange={(country) => setContactForm((current) => ({ ...current, country }))} label="country" /></div></label>
+                <label><span>Country</span><input value={contactForm.country} onChange={(event) => setContactForm({ ...contactForm, country: event.target.value })} placeholder="Example: India" /></label>
               </div>
               <div className="contact-editor-actions"><button type="button" className="quiet-action" onClick={() => setSelectedContact(null)}>Cancel</button><button className="primary-action" disabled={working}>{working ? "Saving…" : "Save to database"}</button></div>
             </form>

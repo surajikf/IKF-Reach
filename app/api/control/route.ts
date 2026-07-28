@@ -83,7 +83,7 @@ Please let me know a suitable time to connect.`;
 export async function GET(req: NextRequest) {
   try {
     const [queue, jobs, settings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
-      db("outreach_queue?select=*&order=created_at.desc&limit=100"),
+      db("outreach_queue?select=*&order=created_at.desc&limit=1000"),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
       db("outreach_settings?select=*&key=eq.sending_policy"),
       db("campaigns?select=id,name,status,sender_name,sender_email&order=created_at.desc"),
@@ -159,7 +159,7 @@ export async function GET(req: NextRequest) {
       return {
         id: item.id,
         action: item.action,
-        company: company.name || item.details?.company || null,
+        company: company.name || item.details?.company || item.details?.campaign_name || null,
         email: contact.email || item.details?.email || item.details?.test_recipient || null,
         createdAt: item.created_at,
       };
@@ -454,6 +454,130 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, count: scheduled.length, scheduled });
     }
 
+    if (body.action === "schedule_campaign") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
+      if (body.confirm !== true) return NextResponse.json({ ok: false, error: "Confirm that you reviewed and approved this campaign." }, { status: 400 });
+      const start = new Date(String(body.scheduledFor || ""));
+      const now = Date.now();
+      if (!Number.isFinite(start.getTime()) || start.getTime() < now + 2 * 60_000) {
+        return NextResponse.json({ ok: false, error: "Choose a campaign start time at least 2 minutes from now." }, { status: 400 });
+      }
+      if (start.getTime() > now + 72 * 60 * 60_000) {
+        return NextResponse.json({ ok: false, error: "Brevo accepts scheduled transactional emails up to 72 hours ahead." }, { status: 400 });
+      }
+      const [settingsRows, campaignRows, mails] = await Promise.all([
+        db("outreach_settings?select=*&key=eq.sending_policy"),
+        db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
+        db(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc&limit=1000`),
+      ]);
+      const policy = settingsRows[0]?.value || {};
+      if (policy.paused) return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” in Controls & APIs before scheduling." }, { status: 409 });
+      const campaign = campaignRows[0];
+      if (!campaign) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
+      if (!mails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unscheduled emails." }, { status: 400 });
+      if (mails.length > 600) return NextResponse.json({ ok: false, error: "Schedule up to 600 approved emails in one campaign." }, { status: 400 });
+      const delayMinutes = Math.max(1, Math.min(60, Number(body.delayMinutes || policy.minimum_delay_minutes || 5)));
+      let scheduleTimes: Date[];
+      try {
+        scheduleTimes = buildCampaignSchedule(start, mails.length, delayMinutes, policy);
+      } catch (error) {
+        return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "The campaign schedule is invalid." }, { status: 400 });
+      }
+      if (scheduleTimes.at(-1)!.getTime() > now + 72 * 60 * 60_000) {
+        return NextResponse.json({
+          ok: false,
+          error: "This campaign would extend beyond Brevo’s 72-hour scheduling horizon. Increase the daily limit, reduce spacing, widen the sending window, or schedule a smaller campaign.",
+        }, { status: 400 });
+      }
+      const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
+      const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      const results: Array<Record<string, any>> = new Array(mails.length);
+      let cursor = 0;
+      async function scheduleWorker() {
+        while (cursor < mails.length) {
+          const index = cursor++;
+          const mail = mails[index];
+          const contact = contactById.get(mail.contact_id);
+          if (!contact?.email) {
+            results[index] = { ok: false, mail, error: "Recipient email is missing." };
+            continue;
+          }
+          try {
+            const scheduledAt = scheduleTimes[index].toISOString();
+            const result = await submitBrevo(mail, contact, scheduledAt);
+            results[index] = { ok: true, mail, contact, scheduledAt, messageId: result.messageId };
+          } catch (error) {
+            results[index] = { ok: false, mail, contact, error: error instanceof Error ? error.message : "Brevo scheduling failed." };
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(6, mails.length) }, () => scheduleWorker()));
+      const successful = results.filter((item) => item?.ok);
+      if (successful.length) {
+        const approvedAt = new Date().toISOString();
+        await db("outreach_queue", {
+          method: "POST",
+          body: JSON.stringify(successful.map((item) => ({
+            id: crypto.randomUUID(),
+            generated_email_id: item.mail.id,
+            contact_id: item.mail.contact_id,
+            campaign_id: campaignId,
+            status: "scheduled_with_brevo",
+            scheduled_for: item.scheduledAt,
+            approved_by: user,
+            approved_at: approvedAt,
+          }))),
+        });
+        await db("email_sends", {
+          method: "POST",
+          body: JSON.stringify(successful.map((item) => ({
+            id: crypto.randomUUID(),
+            generated_email_id: item.mail.id,
+            company_id: item.mail.company_id,
+            contact_id: item.mail.contact_id,
+            campaign_id: campaignId,
+            sender_name: sender.name,
+            sender_email: sender.email,
+            recipient_email: item.contact.email,
+            subject: item.mail.subject,
+            brevo_message_id: item.messageId,
+            status: `scheduled:${item.scheduledAt}`,
+          }))),
+        });
+        for (const ids of chunk(successful.map((item) => item.mail.id), 100)) {
+          await db(`generated_emails?id=in.(${ids.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "scheduled" }) });
+        }
+        await db(`campaigns?id=eq.${encodeURIComponent(campaignId)}`, { method: "PATCH", body: JSON.stringify({ status: "scheduled" }) });
+      }
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "campaign_scheduled",
+          details: {
+            campaign_name: campaign.name,
+            requested: mails.length,
+            scheduled: successful.length,
+            failed: results.length - successful.length,
+            first_scheduled_for: successful[0]?.scheduledAt || null,
+            last_scheduled_for: successful.at(-1)?.scheduledAt || null,
+            scheduled_by: user,
+          },
+        }),
+      });
+      return NextResponse.json({
+        ok: successful.length > 0,
+        campaign: campaign.name,
+        requested: mails.length,
+        scheduled: successful.length,
+        failed: results.length - successful.length,
+        firstScheduledFor: successful[0]?.scheduledAt || null,
+        lastScheduledFor: successful.at(-1)?.scheduledAt || null,
+        errors: results.filter((item) => item && !item.ok).slice(0, 10).map((item) => ({ emailId: item.mail?.id, error: item.error })),
+      }, { status: successful.length ? 200 : 502 });
+    }
+
     if (body.action === "send_now") {
       if (body.confirm !== true) return NextResponse.json({ ok: false, error: "Explicit confirmation is required." }, { status: 400 });
       const settingsRows = await db("outreach_settings?select=*&key=eq.sending_policy");
@@ -555,7 +679,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "policy") {
-      const value = { mode: "manual_approval", daily_limit: Number(body.dailyLimit || 25), sending_window_start: body.windowStart || "10:00", sending_window_end: body.windowEnd || "17:00", timezone: "Asia/Kolkata", minimum_delay_minutes: Number(body.delay || 5), paused: Boolean(body.paused) };
+      const value = { mode: "manual_approval", daily_limit: Math.max(1, Math.min(1000, Number(body.dailyLimit || 25))), sending_window_start: body.windowStart || "10:00", sending_window_end: body.windowEnd || "17:00", timezone: "Asia/Kolkata", minimum_delay_minutes: Math.max(1, Math.min(60, Number(body.delay || 5))), paused: Boolean(body.paused) };
       await db("outreach_settings?key=eq.sending_policy", { method: "PATCH", body: JSON.stringify({ value, updated_by: user, updated_at: new Date().toISOString() }) });
       return NextResponse.json({ ok: true, settings: value });
     }
@@ -874,6 +998,64 @@ function cleanIds(value: unknown): string[] {
 
 function cleanEmails(value: unknown): string[] {
   return [...new Set(String(value || "").split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter((email) => /^\S+@\S+\.\S+$/.test(email)))];
+}
+
+function chunk<T>(items: T[], size: number) {
+  const groups: T[][] = [];
+  for (let index = 0; index < items.length; index += size) groups.push(items.slice(index, index + size));
+  return groups;
+}
+
+function buildCampaignSchedule(start: Date, count: number, delayMinutes: number, policy: Record<string, any>) {
+  const indiaOffsetMinutes = 330;
+  const windowStart = parseClock(String(policy.sending_window_start || "10:00"));
+  const windowEnd = parseClock(String(policy.sending_window_end || "17:00"));
+  if (windowEnd <= windowStart) throw new Error("The sending window end must be later than its start.");
+  if (!insideIndiaWindow(start, String(policy.sending_window_start || "10:00"), String(policy.sending_window_end || "17:00"))) {
+    throw new Error(`Choose a start time inside the ${policy.sending_window_start || "10:00"}–${policy.sending_window_end || "17:00"} Asia/Kolkata sending window.`);
+  }
+  const dailyLimit = Math.max(1, Math.min(1000, Number(policy.daily_limit || 25)));
+  const dayCounts = new Map<string, number>();
+  const times: Date[] = [];
+  let cursor = new Date(start);
+  for (let index = 0; index < count; index += 1) {
+    while (true) {
+      const shifted = new Date(cursor.getTime() + indiaOffsetMinutes * 60_000);
+      const year = shifted.getUTCFullYear();
+      const month = shifted.getUTCMonth();
+      const day = shifted.getUTCDate();
+      const minutes = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+      const dayKey = `${year}-${month + 1}-${day}`;
+      const used = dayCounts.get(dayKey) || 0;
+      if (minutes < windowStart) {
+        cursor = indiaLocalDate(year, month, day, windowStart, indiaOffsetMinutes);
+        continue;
+      }
+      if (minutes > windowEnd || used >= dailyLimit) {
+        cursor = indiaLocalDate(year, month, day + 1, windowStart, indiaOffsetMinutes);
+        continue;
+      }
+      times.push(new Date(cursor));
+      dayCounts.set(dayKey, used + 1);
+      cursor = new Date(cursor.getTime() + delayMinutes * 60_000);
+      break;
+    }
+  }
+  return times;
+}
+
+function parseClock(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    throw new Error("The configured sending window is invalid.");
+  }
+  return hours * 60 + minutes;
+}
+
+function indiaLocalDate(year: number, month: number, day: number, minutes: number, offsetMinutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return new Date(Date.UTC(year, month, day, hours, mins) - offsetMinutes * 60_000);
 }
 
 function insideIndiaWindow(date: Date, start: string, end: string) {
