@@ -145,8 +145,8 @@ export default function Home() {
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [bulkMode, setBulkMode] = useState<"schedule" | "send" | null>(null);
-  const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "" });
+  const [bulkMode, setBulkMode] = useState<"schedule" | "send" | "test" | null>(null);
+  const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
   const [draftForm, setDraftForm] = useState({ email: "", name: "", company: "", website: "", brief: "" });
   const [queueForm, setQueueForm] = useState({ emailId: data.emails[0]?.id || "", scheduledFor: "", confirmed: false });
   const pageSize = 20;
@@ -222,7 +222,7 @@ export default function Home() {
     if (result?.ok) {
       setSelectedIds(new Set());
       setBulkMode(null);
-      setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "" });
+      setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
     }
   }
 
@@ -231,6 +231,19 @@ export default function Home() {
     if (result?.ok) {
       setSelectedIds(new Set());
       setBulkMode(null);
+    }
+  }
+
+  async function runTestSend() {
+    const result = await runAction({
+      action: "send_test",
+      emailIds: [...selectedIds],
+      testRecipients: bulkForm.testRecipients,
+      confirm: bulkForm.confirmed,
+    }, `Test copies sent successfully. The original recipients and draft statuses were not changed.`);
+    if (result?.ok) {
+      setBulkMode(null);
+      setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
     }
   }
 
@@ -337,6 +350,7 @@ export default function Home() {
                 <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? "Ready for review or scheduling" : "Use the checkboxes to choose emails"}</span></div>
                 <div>
                   <button disabled={!selectedIds.size || !control?.canManage || working} onClick={() => runAction({ action: "approve_batch", emailIds: [...selectedIds] }, `${selectedIds.size} emails approved. Nothing has been sent.`)}>Approve</button>
+                  <button className="test-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("test")}>Send test copy</button>
                   <button className="primary-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("schedule")}>Schedule selected</button>
                   <button className="send-action" disabled={!selectedIds.size || !control?.canManage || working} onClick={() => setBulkMode("send")}>Send selected now</button>
                   {selectedIds.size > 0 && <button className="quiet-action" onClick={() => setSelectedIds(new Set())}>Clear</button>}
@@ -356,6 +370,14 @@ export default function Home() {
                   <div><p className="eyebrow">Immediate send</p><h3>Send {selectedIds.size} emails now</h3><p>This action cannot be undone. Type <strong>SEND</strong> to confirm.</p></div>
                   <label>Confirmation<input value={bulkForm.confirmText} onChange={(e) => setBulkForm({ ...bulkForm, confirmText: e.target.value.toUpperCase() })} placeholder="Type SEND" /></label>
                   <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="danger-action" disabled={bulkForm.confirmText !== "SEND" || working} onClick={runBulkSend}>{working ? "Sending…" : "Send now"}</button></div>
+                </div>
+              )}
+              {bulkMode === "test" && (
+                <div className="bulk-panel test-panel">
+                  <div><p className="eyebrow">Inbox preview</p><h3>Send {selectedIds.size} selected email{selectedIds.size === 1 ? "" : "s"} to yourself</h3><p>Each message is clearly marked as a test. Original recipients and draft statuses stay unchanged.</p></div>
+                  <label className="test-recipient-field">Your test email addresses<textarea rows={3} value={bulkForm.testRecipients} onChange={(e) => setBulkForm({ ...bulkForm, testRecipients: e.target.value })} placeholder={"suraj@ikf.co.in\ntanishka@iknowai.in"} /><small>Paste up to 5 addresses, separated by commas or new lines.</small></label>
+                  <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I confirm these are test inboxes and want to send preview copies.</span></label>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!bulkForm.testRecipients.trim() || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test copies"}</button></div>
                 </div>
               )}
               <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />

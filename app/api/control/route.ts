@@ -260,6 +260,48 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, messageId: result.messageId });
     }
 
+    if (body.action === "send_test") {
+      const ids = cleanIds(body.emailIds);
+      const testRecipients = cleanEmails(body.testRecipients);
+      if (!ids.length) return NextResponse.json({ ok: false, error: "Select at least one generated email." }, { status: 400 });
+      if (ids.length > 5) return NextResponse.json({ ok: false, error: "Select up to 5 generated emails for one test." }, { status: 400 });
+      if (!testRecipients.length) return NextResponse.json({ ok: false, error: "Enter at least one valid test email address." }, { status: 400 });
+      if (testRecipients.length > 5) return NextResponse.json({ ok: false, error: "Use up to 5 test inboxes at a time." }, { status: 400 });
+      if (ids.length * testRecipients.length > 15) return NextResponse.json({ ok: false, error: "A test can create up to 15 preview messages. Reduce the selected emails or inboxes." }, { status: 400 });
+      if (body.confirm !== true) return NextResponse.json({ ok: false, error: "Confirm that these are test inboxes." }, { status: 400 });
+
+      const mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
+      const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
+      const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      const sent: Array<Record<string, string>> = [];
+
+      for (const mail of mails) {
+        const originalContact = contactById.get(mail.contact_id) || {};
+        for (const testRecipient of testRecipients) {
+          const result = await submitTestBrevo(mail, testRecipient, originalContact.email || "unknown");
+          await db("activity_log", {
+            method: "POST",
+            body: JSON.stringify({
+              company_id: mail.company_id,
+              contact_id: mail.contact_id,
+              action: "test_email_sent",
+              details: {
+                generated_email_id: mail.id,
+                test_recipient: testRecipient,
+                original_recipient: originalContact.email || null,
+                brevo_message_id: result.messageId,
+                sent_by: user,
+                original_status_unchanged: true,
+              },
+            }),
+          });
+          sent.push({ generatedEmailId: mail.id, testRecipient, messageId: result.messageId });
+        }
+      }
+      return NextResponse.json({ ok: true, count: sent.length, sent });
+    }
+
     if (body.action === "send_batch") {
       const ids = cleanIds(body.emailIds);
       if (!ids.length) return NextResponse.json({ ok: false, error: "Select at least one email." }, { status: 400 });
@@ -317,6 +359,10 @@ function cleanIds(value: unknown): string[] {
   return [...new Set(value.map(String).filter((id) => /^[0-9a-f-]{36}$/i.test(id)))];
 }
 
+function cleanEmails(value: unknown): string[] {
+  return [...new Set(String(value || "").split(/[\s,;]+/).map((email) => email.trim().toLowerCase()).filter((email) => /^\S+@\S+\.\S+$/.test(email)))];
+}
+
 function insideIndiaWindow(date: Date, start: string, end: string) {
   const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
   return parts >= start && parts <= end;
@@ -338,5 +384,24 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Brevo rejected the email request.");
+  return result;
+}
+
+async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string) {
+  const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sender,
+      replyTo: { email: replyTo() },
+      to: [{ email: testRecipient, name: "IKF Test Recipient" }],
+      subject: `[TEST PREVIEW] ${mail.subject}`,
+      htmlContent: `${previewBanner}${mail.html_body}`,
+      tags: ["ikf-outreach", "test-preview"],
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Brevo rejected the test email.");
   return result;
 }

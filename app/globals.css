@@ -196,6 +196,7 @@ tbody tr:hover { background: #f7f8ff; }
 .selection-toolbar button, .bulk-actions button, .send-action, .quiet-action { border: 1px solid var(--line); background: #fff; color: var(--ink); border-radius: 10px; padding: 10px 14px; font-weight: 700; }
 .selection-toolbar .primary-action, .bulk-actions .primary-action { border-color: var(--accent); background: var(--accent); color: #fff; }
 .selection-toolbar .send-action { color: #b53240; border-color: #f1cbd0; background: #fff7f8; }
+.selection-toolbar .test-action { color: #176a85; border-color: #bfe1eb; background: #f1fbfe; }
 .quiet-action { color: var(--muted) !important; }
 .bulk-panel { margin: 0 20px 18px; padding: 20px; display: grid; grid-template-columns: minmax(260px,1.5fr) minmax(190px,.7fr) minmax(190px,.7fr); gap: 16px; align-items: end; background: linear-gradient(135deg,#f2f0ff,#fafaff); border: 1px solid #d9d5ff; border-radius: 14px; }
 .bulk-panel h3 { margin: 2px 0 5px; font-size: 21px; }
@@ -206,6 +207,14 @@ tbody tr:hover { background: #f7f8ff; }
 .bulk-panel .bulk-actions { justify-content: flex-end; }
 .danger-panel { grid-template-columns: minmax(260px,1.5fr) minmax(190px,.7fr) auto; background: #fff7f8; border-color: #f2ced3; }
 .danger-panel .danger-action { min-height: 44px; }
+.test-panel { grid-template-columns: minmax(260px,1fr) minmax(360px,1.2fr); background: linear-gradient(135deg,#eefaff,#f8fdff); border-color: #bfe4ef; }
+.test-panel > div:first-child { align-self: start; }
+.test-recipient-field { grid-column: 2; grid-row: 1 / span 2; }
+.test-recipient-field textarea { resize: vertical; min-height: 98px; }
+.test-recipient-field small { color: var(--muted); font-weight: 400; }
+.test-panel .confirm-box { grid-column: 1; }
+.test-panel .bulk-actions { grid-column: 1 / -1; }
+.test-send-action { border: 0 !important; background: #177e9d !important; color: #fff !important; min-height: 44px; }
 .mini-list > div { align-items: center; gap: 10px; }
 .mini-list > div > span { display: grid; gap: 3px; }
 .mini-list small { color: var(--muted); }
@@ -216,6 +225,8 @@ tbody tr:hover { background: #f7f8ff; }
 @media (max-width: 1100px) {
   .bulk-panel, .danger-panel { grid-template-columns: 1fr 1fr; }
   .bulk-panel > div:first-child { grid-column: 1 / -1; }
+  .test-panel { grid-template-columns: 1fr; }
+  .test-panel > div:first-child, .test-panel .test-recipient-field, .test-panel .confirm-box, .test-panel .bulk-actions { grid-column: 1; grid-row: auto; }
 }
 @media (max-width: 1320px) {
   .table-wrap table:has(.check-column) { min-width: 900px; }
