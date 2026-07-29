@@ -22,7 +22,7 @@ test("campaign creation exposes durable background research and verified sender 
 test("server queues campaign sources and processes them in bounded batches", () => {
   assert.match(api, /queue_background_campaign/);
   assert.match(api, /process_background_campaign/);
-  assert.match(api, /LIMIT 3/);
+  assert.match(api, /LIMIT 12/);
   assert.match(api, /suppliedWebsites\.length > 50/);
   assert.doesNotMatch(api, /parsedContacts\.length > 50/);
   assert.doesNotMatch(api, /\.slice\(0, 120_000\)/);
@@ -37,7 +37,8 @@ test("contact documents queue every valid record and retain PDF organization con
 });
 
 test("worker continues campaign research independently of the browser", () => {
-  assert.match(worker, /ctx\.waitUntil\(runBackgroundCampaignBatch/);
+  assert.match(worker, /const progress = await runBackgroundCampaignBatch/);
+  assert.match(worker, /ctx\.waitUntil\(kickNextBackgroundBatch/);
   assert.match(worker, /handler\.fetch\(controlRequest\(\), env, ctx\)/);
   assert.match(worker, /x-ikf-background-token/);
   assert.match(worker, /\/api\/background-campaign/);
@@ -49,7 +50,11 @@ test("generated drafts enforce the requested selective email formatting", () => 
   assert.match(api, /company: `<strong><u>/);
   assert.match(api, /emphasizeLeadingTitle/);
   assert.match(api, /emphasizeImportantKeywords/);
+  assert.match(api, /<strong>\$1:<\/strong>/);
   assert.match(api, /normalizeAiStyle/);
+  assert.match(api, /placeCommunityBeforeSignature/);
+  assert.match(api, /signatureIndex/);
+  assert.match(api, /formatting_version: 4/);
   assert.match(api, /safe\.split\(`IKFPERSONALIZATIONTOKEN/);
   assert.match(api, /refreshBackgroundCampaignDraftFormatting/);
   assert.match(api, /sent_and_scheduled_excluded: true/);
@@ -107,7 +112,7 @@ test("authorized operators can stop durable background research safely", () => {
   assert.match(api, /cancel_background_campaign/);
   assert.match(api, /SET status = 'cancelled'/);
   assert.match(api, /assertBackgroundJobActive/);
-  assert.match(worker, /if \(!result\.remaining\) return/);
+  assert.match(worker, /if \(progress\.remaining\)/);
 });
 
 test("campaign audience permits safe deletion of unsent generated emails only", () => {

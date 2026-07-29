@@ -126,13 +126,21 @@ Please let me know a suitable time to connect.`;
     ? `Dear {{name}},\n\nWhile reviewing {{company}}, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.\n\n`
     : "";
   let body = renderEmailTemplate(`${personalizedOpening}${template || defaultTemplate}`, { name, company: input.company, topic, research: context, focusAreas });
-  if (!/chat\.whatsapp\.com/i.test(body)) {
-    body += `<p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p>`;
-  }
   if (!/I Knowledge Factory Pvt\. Ltd\./i.test(body)) {
     body += `<p>Regards,<br><strong>${escapeHtml(input.senderName || sender.name)}</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
   }
+  body = placeCommunityBeforeSignature(body);
   return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5">${body}</div>`;
+}
+
+function placeCommunityBeforeSignature(html: string) {
+  const communityBlock = `<p>Alternatively, you are welcome to join our <strong>Ai Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p>`;
+  const existingCommunity = html.match(/<p>(?:(?!<\/p>)[\s\S])*?chat\.whatsapp\.com(?:(?!<\/p>)[\s\S])*?<\/p>/i)?.[0] || "";
+  const withoutCommunity = existingCommunity ? html.replace(existingCommunity, "") : html;
+  const signatureIndex = withoutCommunity.search(/<p>\s*Regards,/i);
+  const block = existingCommunity || communityBlock;
+  if (signatureIndex < 0) return `${withoutCommunity}${block}`;
+  return `${withoutCommunity.slice(0, signatureIndex)}${block}${withoutCommunity.slice(signatureIndex)}`;
 }
 
 export async function GET(req: NextRequest) {
@@ -400,7 +408,7 @@ export async function POST(req: NextRequest) {
       if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
         return NextResponse.json({ ok: false, error: "A valid background campaign job is required." }, { status: 400 });
       }
-      const progress = await processBackgroundCampaignBatch(jobId);
+      const progress = await processBackgroundCampaignBatch(jobId, body.refreshDrafts === true);
       return NextResponse.json({ ok: true, ...progress });
     }
 
@@ -1514,7 +1522,7 @@ async function queueBackgroundCampaign(input: {
   };
 }
 
-async function processBackgroundCampaignBatch(jobId: string) {
+async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = false) {
   const queueDb = getQueueDb();
   const jobResult = await queueDb.prepare("SELECT * FROM background_research_jobs WHERE id = ? LIMIT 1").bind(jobId).all();
   const job = jobResult.results?.[0] as Record<string, any> | undefined;
@@ -1522,9 +1530,9 @@ async function processBackgroundCampaignBatch(jobId: string) {
   if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(job.status))) {
     return { jobId, status: job.status, remaining: 0, completedItems: Number(job.completed_items || 0), totalItems: Number(job.total_items || 0) };
   }
-  // Refresh the small set of drafts created before the current formatting
-  // rules. Sent and scheduled messages are never eligible for this update.
-  if (Number(job.completed_items || 0) <= 3 && Number(job.drafts_created || 0) <= 3) {
+  // Refresh existing unsent drafts once when a worker generation run starts.
+  // Sent and scheduled messages are never eligible for this update.
+  if (refreshDrafts) {
     await refreshBackgroundCampaignDraftFormatting(job);
   }
 
@@ -1544,7 +1552,7 @@ async function processBackgroundCampaignBatch(jobId: string) {
     SELECT * FROM background_research_items
     WHERE job_id = ? AND status = 'queued'
     ORDER BY created_at ASC
-    LIMIT 3
+    LIMIT 12
   `).bind(jobId).all();
   const claimId = crypto.randomUUID();
   const candidates = (queued.results || []) as Array<Record<string, any>>;
@@ -1743,12 +1751,15 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
   const campaignId = String(job.campaign_id || "");
   if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return 0;
   const drafts = await db(
-    `generated_emails?select=id,contact_id,company_id,status,personalization_data&campaign_id=eq.${encodeURIComponent(campaignId)}&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=10`,
+    `generated_emails?select=id,contact_id,company_id,status,personalization_data&campaign_id=eq.${encodeURIComponent(campaignId)}&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=1000`,
   );
-  if (!drafts.length) return 0;
+  const outdatedDrafts = drafts.filter((draft: Record<string, any>) =>
+    Number(draft.personalization_data?.formatting_version || 0) < 4
+  );
+  if (!outdatedDrafts.length) return 0;
 
-  const contactIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
-  const companyIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.company_id || "")).filter(Boolean))];
+  const contactIds = [...new Set(outdatedDrafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
+  const companyIds = [...new Set(outdatedDrafts.map((draft: Record<string, any>) => String(draft.company_id || "")).filter(Boolean))];
   const [contacts, companies, campaigns] = await Promise.all([
     contactIds.length ? db(`contacts?select=id,email,full_name&id=in.(${contactIds.join(",")})`) : Promise.resolve([]),
     companyIds.length ? db(`companies?select=id,name&id=in.(${companyIds.join(",")})`) : Promise.resolve([]),
@@ -1760,7 +1771,7 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
   const formattedAt = new Date().toISOString();
   let updated = 0;
 
-  for (const group of chunk(drafts, 10)) {
+  for (const group of chunk(outdatedDrafts, 10)) {
     const changes = group.flatMap((draft: Record<string, any>) => {
       const contact = contactById.get(String(draft.contact_id));
       const company = companyById.get(String(draft.company_id));
@@ -1787,7 +1798,7 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
           bold_underline_organization: true,
           selective_bold_titles: true,
           important_keywords_bold: true,
-          formatting_version: 3,
+          formatting_version: 4,
           formatting_refreshed_at: formattedAt,
         },
       }];
@@ -1932,6 +1943,9 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
         email_font: "Calibri",
         email_font_size: "11pt",
         bold_underline_organization: true,
+        selective_bold_titles: true,
+        important_keywords_bold: true,
+        formatting_version: 4,
         sending_hold: true,
       },
     }),
@@ -2332,7 +2346,7 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
     })
     .join("");
   const selectivelyEmphasized = emphasizeImportantKeywords(rendered)
-    .replace(/<li>([^:<>]{2,90}):(?=\s|&nbsp;|$)/gi, "<li><strong>$1</strong>");
+    .replace(/<li>([^:<>]{2,90}):(?=\s|&nbsp;|$)/gi, "<li><strong>$1:</strong>");
   return cleanupUnresolvedHtml(selectivelyEmphasized);
 }
 
@@ -2340,7 +2354,7 @@ function emphasizeLeadingTitle(line: string) {
   if (!line || /^Dear(?:\s|&nbsp;)/i.test(line) || /^https?:\/\//i.test(line)) return line;
   return line.replace(
     /^((?!<strong\b)(?!<u\b)[^:<>]{2,90}):(?=\s|&nbsp;|$)/i,
-    "<strong>$1</strong>",
+    "<strong>$1:</strong>",
   );
 }
 
@@ -2350,7 +2364,7 @@ function emphasizeImportantKeywords(html: string) {
     .map((segment) => /^<strong\b/i.test(segment)
       ? segment
       : segment.replace(
-        /\b(Ai Native Thinking Masterclass|Ai Leadership Masterclass|Ai Native Thinkers Community|Ai Native Thinking|Ai-first workflows|Responsible Ai)\b/gi,
+        /\b(Ai Native Thinking Masterclass|Ai Leadership Masterclass|Ai Native Thinkers Community|Ai Native Thinking|Ai-first workflows|Responsible Ai|Tanishka)\b/gi,
         "<strong>$1</strong>",
       ))
     .join("");

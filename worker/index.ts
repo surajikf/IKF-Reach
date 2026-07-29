@@ -31,7 +31,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/background-campaign" && request.method === "POST") {
-      let body: { jobId?: string };
+      let body: { jobId?: string; refreshDrafts?: boolean };
       try {
         body = await request.json();
       } catch {
@@ -53,8 +53,20 @@ const worker = {
       if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(existingJob.status))) {
         return Response.json({ ok: true, accepted: false, jobId, status: existingJob.status }, { status: 200 });
       }
-      ctx.waitUntil(runBackgroundCampaignBatch(request.url, jobId, env.SUPABASE_SECRET_KEY, env, ctx));
-      return Response.json({ ok: true, accepted: true, jobId }, { status: 202 });
+      // Complete one bounded batch before returning so an accepted request
+      // always represents real progress, even if the browser closes.
+      const progress = await runBackgroundCampaignBatch(
+        request.url,
+        jobId,
+        env.SUPABASE_SECRET_KEY,
+        env,
+        ctx,
+        body.refreshDrafts !== false,
+      );
+      if (progress.remaining) {
+        ctx.waitUntil(kickNextBackgroundBatch(request.url, jobId, env.SUPABASE_SECRET_KEY));
+      }
+      return Response.json({ ok: true, accepted: true, jobId, ...progress }, { status: 202 });
     }
 
     if (url.pathname === "/_vinext/image") {
@@ -78,6 +90,7 @@ async function runBackgroundCampaignBatch(
   token: string,
   env: Env,
   ctx: ExecutionContext,
+  refreshDrafts: boolean,
 ) {
   const controlUrl = new URL("/api/control", requestUrl);
   const workerHeaders = {
@@ -88,24 +101,32 @@ async function runBackgroundCampaignBatch(
   const controlRequest = () => new Request(controlUrl, {
     method: "POST",
     headers: workerHeaders,
-    body: JSON.stringify({ action: "process_background_campaign", jobId }),
+    body: JSON.stringify({ action: "process_background_campaign", jobId, refreshDrafts }),
   });
   // Run the first batch directly through the application handler. This avoids
   // depending on a same-zone network request for the work accepted above.
   const response = await handler.fetch(controlRequest(), env, ctx);
   if (!response.ok) {
     const retry = await handler.fetch(controlRequest(), env, ctx);
-    if (!retry.ok) return;
+    if (!retry.ok) return { remaining: 0 };
     const retryResult = await retry.json() as { remaining?: number };
-    if (!retryResult.remaining) return;
+    return retryResult;
   } else {
     const result = await response.json() as { remaining?: number };
-    if (!result.remaining) return;
+    return result;
   }
+}
+
+async function kickNextBackgroundBatch(requestUrl: string, jobId: string, token: string) {
+  const workerHeaders = {
+    "Content-Type": "application/json",
+    "x-ikf-background-job": jobId,
+    ...(token ? { "x-ikf-background-token": token } : {}),
+  };
   await fetch(new URL("/api/background-campaign", requestUrl), {
     method: "POST",
     headers: workerHeaders,
-    body: JSON.stringify({ jobId }),
+    body: JSON.stringify({ jobId, refreshDrafts: false }),
   });
 }
 
