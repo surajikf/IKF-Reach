@@ -68,3 +68,78 @@ export const emailAnalyticsEvents = sqliteTable("email_analytics_events", {
   index("email_analytics_events_date_idx").on(table.eventAt),
   index("email_analytics_events_message_idx").on(table.messageId),
 ]);
+
+export const emailValidationJobs = sqliteTable("email_validation_jobs", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("queued"),
+  scheduledFor: text("scheduled_for"),
+  totalItems: integer("total_items").notNull().default(0),
+  processedItems: integer("processed_items").notNull().default(0),
+  validItems: integer("valid_items").notNull().default(0),
+  riskyItems: integer("risky_items").notNull().default(0),
+  invalidItems: integer("invalid_items").notNull().default(0),
+  unknownItems: integer("unknown_items").notNull().default(0),
+  failedItems: integer("failed_items").notNull().default(0),
+  createdBy: text("created_by").notNull(),
+  lastError: text("last_error"),
+  cancelRequested: integer("cancel_requested").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("email_validation_jobs_status_idx").on(table.status),
+  index("email_validation_jobs_schedule_idx").on(table.scheduledFor),
+]);
+
+export const emailValidationItems = sqliteTable("email_validation_items", {
+  id: text("id").primaryKey(),
+  jobId: text("job_id").notNull(),
+  contactId: text("contact_id").notNull(),
+  email: text("email").notNull(),
+  status: text("status").notNull().default("queued"),
+  verdict: text("verdict"),
+  score: integer("score"),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("email_validation_items_job_contact_uidx").on(table.jobId, table.contactId),
+  index("email_validation_items_job_status_idx").on(table.jobId, table.status),
+  index("email_validation_items_email_idx").on(table.email),
+]);
+
+export const emailValidationResults = sqliteTable("email_validation_results", {
+  contactId: text("contact_id").primaryKey(),
+  email: text("email").notNull(),
+  normalizedEmail: text("normalized_email").notNull(),
+  domain: text("domain").notNull(),
+  verdict: text("verdict").notNull(),
+  score: integer("score").notNull(),
+  syntaxValid: integer("syntax_valid").notNull(),
+  domainReachable: integer("domain_reachable"),
+  roleBased: integer("role_based").notNull().default(0),
+  disposable: integer("disposable").notNull().default(0),
+  previousHardBounce: integer("previous_hard_bounce").notNull().default(0),
+  previousSoftBounce: integer("previous_soft_bounce").notNull().default(0),
+  previousDelivered: integer("previous_delivered").notNull().default(0),
+  complaint: integer("complaint").notNull().default(0),
+  unsubscribed: integer("unsubscribed").notNull().default(0),
+  reasons: text("reasons").notNull(),
+  mxRecords: text("mx_records").notNull(),
+  jobId: text("job_id").notNull(),
+  validatedAt: text("validated_at").notNull(),
+}, (table) => [
+  index("email_validation_results_email_idx").on(table.normalizedEmail),
+  index("email_validation_results_verdict_idx").on(table.verdict),
+]);
+
+export const emailDomainValidationCache = sqliteTable("email_domain_validation_cache", {
+  domain: text("domain").primaryKey(),
+  reachable: integer("reachable"),
+  mxRecords: text("mx_records").notNull(),
+  fallbackAddressRecord: integer("fallback_address_record").notNull().default(0),
+  error: text("error"),
+  checkedAt: text("checked_at").notNull(),
+});

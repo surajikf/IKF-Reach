@@ -13,6 +13,14 @@ import {
   renderPersonalizedSubject,
   replacePersonalizationPlaceholders,
 } from "../../lib/personalization";
+import {
+  emailDomain,
+  isPracticalEmailSyntax,
+  normalizeEmailAddress,
+  validateEmailSignals,
+  type EmailDomainSignals,
+  type EmailHistorySignals,
+} from "../../lib/email-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +52,221 @@ async function db(path: string, init: RequestInit = {}) {
   if (!response.ok) throw new Error(`Database request failed (${response.status})`);
   const text = await response.text();
   return text ? JSON.parse(text) : [];
+}
+
+async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
+  const recipients = contacts
+    .filter((contact) => contact?.id && contact?.email)
+    .map((contact) => ({
+      id: String(contact.id),
+      email: normalizeEmailAddress(contact.email),
+  }));
+  if (!recipients.length) throw new Error("No deliverable recipients were found.");
+  const queueDb = getQueueDb();
+  const validationRows: Array<Record<string, any>> = [];
+  const eventRows: Array<Record<string, any>> = [];
+  for (const recipientBatch of chunk(recipients, 80)) {
+    const contactPlaceholders = recipientBatch.map(() => "?").join(",");
+    const emailPlaceholders = recipientBatch.map(() => "?").join(",");
+    const [validationResult, eventResult] = await Promise.all([
+      queueDb.prepare(`
+        SELECT contact_id, email, verdict, reasons
+        FROM email_validation_results
+        WHERE contact_id IN (${contactPlaceholders})
+      `).bind(...recipientBatch.map((recipient) => recipient.id)).all<Record<string, any>>(),
+      queueDb.prepare(`
+        SELECT lower(recipient_email) AS email, event, reason
+        FROM email_analytics_events
+        WHERE lower(recipient_email) IN (${emailPlaceholders})
+          AND event IN ('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed')
+      `).bind(...recipientBatch.map((recipient) => recipient.email)).all<Record<string, any>>(),
+    ]);
+    validationRows.push(...(validationResult.results || []));
+    eventRows.push(...(eventResult.results || []));
+  }
+  const blocked = new Map<string, string>();
+  const recipientEmailsByContactId = new Map(
+    recipients.map((recipient) => [recipient.id, recipient.email]),
+  );
+  const checkedContactIds = new Set<string>();
+  for (const row of validationRows) {
+    const currentEmail = recipientEmailsByContactId.get(String(row.contact_id));
+    if (!currentEmail || normalizeEmailAddress(row.email) !== currentEmail) continue;
+    checkedContactIds.add(String(row.contact_id));
+    if (!["invalid", "unknown"].includes(String(row.verdict))) continue;
+    const reasons = (() => {
+      try {
+        const value = JSON.parse(String(row.reasons || "[]"));
+        return Array.isArray(value) ? String(value[0] || "Validation failed.") : "Validation failed.";
+      } catch {
+        return "Validation failed.";
+      }
+    })();
+    blocked.set(normalizeEmailAddress(row.email), reasons);
+  }
+  for (const recipient of recipients) {
+    if (!checkedContactIds.has(recipient.id)) {
+      blocked.set(recipient.email, "This address has not completed email validation.");
+    }
+  }
+  for (const row of eventRows) {
+    blocked.set(normalizeEmailAddress(row.email), row.event === "spam"
+      ? "A spam complaint was recorded."
+      : row.event === "unsubscribed"
+        ? "The recipient unsubscribed."
+        : "This address previously hard-bounced or was blocked.");
+  }
+  if (blocked.size) {
+    const samples = [...blocked.entries()].slice(0, 4).map(([email, reason]) => `${email} (${reason})`);
+    throw new Error(
+      `${blocked.size} recipient${blocked.size === 1 ? " is" : "s are"} unvalidated or quarantined and cannot be sent: ${samples.join("; ")}${blocked.size > samples.length ? "; and more" : ""}. Complete validation or remove them before delivery.`,
+    );
+  }
+}
+
+async function contactsForGeneratedEmails(rows: Array<Record<string, any>>) {
+  const contactIds = [...new Set(rows.map((row) => String(row.contact_id || "")).filter(Boolean))];
+  const contacts: Array<Record<string, any>> = [];
+  for (const idBatch of chunk(contactIds, 80)) {
+    contacts.push(...await db(`contacts?select=id,email&id=in.(${idBatch.map(encodeURIComponent).join(",")})&limit=100`));
+  }
+  return contacts;
+}
+
+async function validateContactBeforeDraft(contactId: string, rawEmail: string) {
+  const email = normalizeEmailAddress(rawEmail);
+  const domain = emailDomain(email);
+  const queueDb = getQueueDb();
+  const eventRows = await queueDb.prepare(`
+    SELECT event
+    FROM email_analytics_events
+    WHERE lower(recipient_email) = ?
+      AND event IN ('hardBounce', 'softBounce', 'blocked', 'invalid', 'spam', 'unsubscribed', 'delivered')
+  `).bind(email).all<{ event: string }>();
+  const history: EmailHistorySignals = {};
+  for (const row of eventRows.results || []) {
+    if (["hardBounce", "blocked", "invalid"].includes(row.event)) history.hardBounce = true;
+    if (row.event === "softBounce") history.softBounce = true;
+    if (row.event === "spam") history.complaint = true;
+    if (row.event === "unsubscribed") history.unsubscribed = true;
+    if (row.event === "delivered") history.delivered = true;
+  }
+  const domainSignals = isPracticalEmailSyntax(email)
+    ? await draftDomainSignals(queueDb, domain)
+    : { reachable: false, mxRecords: [] };
+  const result = validateEmailSignals(email, domainSignals, history);
+  const validatedAt = new Date().toISOString();
+  await queueDb.prepare(`
+    INSERT INTO email_validation_results (
+      contact_id, email, normalized_email, domain, verdict, score,
+      syntax_valid, domain_reachable, role_based, disposable,
+      previous_hard_bounce, previous_soft_bounce, previous_delivered,
+      complaint, unsubscribed, reasons, mx_records, job_id, validated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'campaign-preflight', ?)
+    ON CONFLICT(contact_id) DO UPDATE SET
+      email = excluded.email,
+      normalized_email = excluded.normalized_email,
+      domain = excluded.domain,
+      verdict = excluded.verdict,
+      score = excluded.score,
+      syntax_valid = excluded.syntax_valid,
+      domain_reachable = excluded.domain_reachable,
+      role_based = excluded.role_based,
+      disposable = excluded.disposable,
+      previous_hard_bounce = excluded.previous_hard_bounce,
+      previous_soft_bounce = excluded.previous_soft_bounce,
+      previous_delivered = excluded.previous_delivered,
+      complaint = excluded.complaint,
+      unsubscribed = excluded.unsubscribed,
+      reasons = excluded.reasons,
+      mx_records = excluded.mx_records,
+      job_id = excluded.job_id,
+      validated_at = excluded.validated_at
+  `).bind(
+    contactId,
+    email,
+    result.normalizedEmail,
+    result.domain,
+    result.verdict,
+    result.score,
+    result.syntaxValid ? 1 : 0,
+    result.domainReachable == null ? null : result.domainReachable ? 1 : 0,
+    result.roleBased ? 1 : 0,
+    result.disposable ? 1 : 0,
+    result.history.hardBounce ? 1 : 0,
+    result.history.softBounce ? 1 : 0,
+    result.history.delivered ? 1 : 0,
+    result.history.complaint ? 1 : 0,
+    result.history.unsubscribed ? 1 : 0,
+    JSON.stringify(result.reasons),
+    JSON.stringify(result.mxRecords),
+    validatedAt,
+  ).run();
+  if (result.verdict === "invalid") {
+    throw new Error(`Email quarantined before draft generation: ${email} — ${result.reasons[0] || "validation failed"}`);
+  }
+  return result;
+}
+
+async function draftDomainSignals(queueDb: D1Database, domain: string): Promise<EmailDomainSignals> {
+  const cached = await queueDb.prepare(`
+    SELECT * FROM email_domain_validation_cache
+    WHERE domain = ? AND checked_at >= ?
+    LIMIT 1
+  `).bind(domain, new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString()).first<Record<string, any>>();
+  if (cached) {
+    return {
+      reachable: cached.reachable == null ? null : Boolean(cached.reachable),
+      mxRecords: JSON.parse(String(cached.mx_records || "[]")),
+      fallbackAddressRecord: Boolean(cached.fallback_address_record),
+      error: cached.error || null,
+    };
+  }
+  let signals: EmailDomainSignals = { reachable: null, mxRecords: [] };
+  try {
+    const query = async (type: string) => {
+      const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=${type}`, {
+        headers: { Accept: "application/dns-json" },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) throw new Error(`DNS lookup failed (${response.status}).`);
+      return response.json() as Promise<{ Status?: number; Answer?: Array<{ type?: number; data?: string }> }>;
+    };
+    const mx = await query("MX");
+    const mxRecords = (mx.Answer || []).filter((answer) => Number(answer.type) === 15).map((answer) => String(answer.data || ""));
+    const nullMx = mxRecords.some((record) => /(?:^|\s)\.$/.test(record));
+    if (mxRecords.length && !nullMx) {
+      signals = { reachable: true, mxRecords };
+    } else if (nullMx || Number(mx.Status) === 3) {
+      signals = { reachable: false, mxRecords };
+    } else {
+      const [a, aaaa] = await Promise.all([query("A"), query("AAAA")]);
+      const fallbackAddressRecord = (a.Answer || []).some((answer) => Number(answer.type) === 1)
+        || (aaaa.Answer || []).some((answer) => Number(answer.type) === 28);
+      signals = { reachable: fallbackAddressRecord, mxRecords: [], fallbackAddressRecord };
+    }
+  } catch (error) {
+    signals = { reachable: null, mxRecords: [], error: error instanceof Error ? error.message : "DNS lookup failed." };
+  }
+  await queueDb.prepare(`
+    INSERT INTO email_domain_validation_cache (
+      domain, reachable, mx_records, fallback_address_record, error, checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(domain) DO UPDATE SET
+      reachable = excluded.reachable,
+      mx_records = excluded.mx_records,
+      fallback_address_record = excluded.fallback_address_record,
+      error = excluded.error,
+      checked_at = excluded.checked_at
+  `).bind(
+    domain,
+    signals.reachable == null ? null : signals.reachable ? 1 : 0,
+    JSON.stringify(signals.mxRecords || []),
+    signals.fallbackAddressRecord ? 1 : 0,
+    signals.error || null,
+    new Date().toISOString(),
+  ).run();
+  return signals;
 }
 
 function normalizedReplyTo(value: unknown, fallback = replyTo()) {
@@ -536,6 +759,12 @@ export async function POST(req: NextRequest) {
           data_confidence: "user_verified",
         }),
       });
+      if (normalizeEmailAddress(contact.email) !== email) {
+        await getQueueDb()
+          .prepare("DELETE FROM email_validation_results WHERE contact_id = ?")
+          .bind(contactId)
+          .run();
+      }
       let updatedCompany: Record<string, any> | null = null;
       if (contact.company_id) {
         const websiteInput = String(body.website || "").trim();
@@ -620,6 +849,8 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "approve") {
+      const pending = await db(`generated_emails?select=id,contact_id&id=eq.${encodeURIComponent(String(body.emailId || ""))}&limit=1`);
+      await assertContactsDeliverable(await contactsForGeneratedEmails(pending));
       const rows = await db(`generated_emails?id=eq.${body.emailId}`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
       return NextResponse.json({ ok: true, email: rows[0] });
     }
@@ -949,6 +1180,8 @@ export async function POST(req: NextRequest) {
     if (body.action === "approve_batch") {
       const ids = cleanIds(body.emailIds);
       if (!ids.length) return NextResponse.json({ ok: false, error: "Select at least one email." }, { status: 400 });
+      const pending = await db(`generated_emails?select=id,contact_id&id=in.(${ids.join(",")})&limit=5000`);
+      await assertContactsDeliverable(await contactsForGeneratedEmails(pending));
       await db(`generated_emails?id=in.(${ids.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
       return NextResponse.json({ ok: true, count: ids.length });
     }
@@ -958,8 +1191,9 @@ export async function POST(req: NextRequest) {
       if (!/^[0-9a-f-]{36}$/i.test(campaignId)) {
         return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
       }
-      const pending = await db(`generated_emails?select=id&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review&limit=5000`);
+      const pending = await db(`generated_emails?select=id,contact_id&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review&limit=5000`);
       if (!pending.length) return NextResponse.json({ ok: true, count: 0 });
+      await assertContactsDeliverable(await contactsForGeneratedEmails(pending));
       await db(`generated_emails?campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review`, {
         method: "PATCH",
         body: JSON.stringify({ status: "approved" }),
@@ -991,6 +1225,7 @@ export async function POST(req: NextRequest) {
       }
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
+      await assertContactsDeliverable([contact]);
       const usedSender = await senderForMail(mail);
       const result = await submitBrevo(mail, contact, scheduledAt.toISOString());
       const rows = await db("outreach_queue", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, status: "scheduled_with_brevo", scheduled_for: scheduledAt.toISOString(), approved_by: user, approved_at: new Date().toISOString() }) });
@@ -1038,6 +1273,7 @@ export async function POST(req: NextRequest) {
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      await assertContactsDeliverable(contacts);
       const scheduled: Array<Record<string, any>> = [];
 
       for (let index = 0; index < mails.length; index += 1) {
@@ -1127,6 +1363,7 @@ export async function POST(req: NextRequest) {
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      await assertContactsDeliverable(contacts);
       const results: Array<Record<string, any>> = new Array(mails.length);
       let cursor = 0;
       async function scheduleWorker() {
@@ -1230,6 +1467,7 @@ export async function POST(req: NextRequest) {
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
       if (!contact?.email) return NextResponse.json({ ok: false, error: "The selected draft has no valid recipient." }, { status: 400 });
+      await assertContactsDeliverable([contact]);
       const usedSender = await senderForMail(mail);
       const result = await submitBrevo(mail, contact);
       await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
@@ -1295,6 +1533,7 @@ export async function POST(req: NextRequest) {
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      await assertContactsDeliverable(contacts);
       const sent: string[] = [];
       for (const mail of mails) {
         const contact = contactById.get(mail.contact_id);
@@ -1328,6 +1567,7 @@ export async function POST(req: NextRequest) {
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      await assertContactsDeliverable(contacts);
       const sent: string[] = [];
       const failures: Array<{ id: string; error: string }> = [];
       for (const mail of mails) {
@@ -1626,7 +1866,13 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
       const result = await processBackgroundResearchItem(item, job);
       return { item, ok: true, result };
     } catch (error) {
-      return { item, ok: false, error: error instanceof Error ? error.message : "Research failed." };
+      const message = error instanceof Error ? error.message : "Research failed.";
+      return {
+        item,
+        ok: false,
+        quarantined: message.startsWith("Email quarantined before draft generation:"),
+        error: message,
+      };
     }
   }));
   if (outcomes.length) {
@@ -1635,8 +1881,12 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
       SET status = ?, result = ?, error = ?, claimed_by = NULL, updated_at = ?
       WHERE id = ? AND status = 'researching'
     `).bind(
-      outcome.ok ? "completed" : "failed",
-      outcome.ok ? JSON.stringify(outcome.result) : null,
+      outcome.ok ? "completed" : outcome.quarantined ? "quarantined" : "failed",
+      outcome.ok
+        ? JSON.stringify(outcome.result)
+        : outcome.quarantined
+          ? JSON.stringify({ contactsFound: 1, draftsCreated: 0, quarantined: true, email: outcome.item.input_value })
+          : null,
       outcome.ok ? null : outcome.error,
       new Date().toISOString(),
       outcome.item.id,
@@ -1663,11 +1913,11 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     SELECT
       COUNT(*) AS total,
       SUM(CASE
-        WHEN status = 'completed' OR (status = 'failed' AND attempts >= 2) THEN 1
+        WHEN status IN ('completed', 'quarantined') OR (status = 'failed' AND attempts >= 2) THEN 1
         ELSE 0
       END) AS completed,
       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS successful,
-      SUM(CASE WHEN status = 'failed' AND attempts >= 2 THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'quarantined' OR (status = 'failed' AND attempts >= 2) THEN 1 ELSE 0 END) AS failed,
       SUM(CASE WHEN status = 'failed' AND attempts < 2 THEN 1 ELSE 0 END) AS retrying,
       SUM(CASE
         WHEN status IN ('queued', 'researching')
@@ -1686,7 +1936,7 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
   const completedOutcomes = await queueDb.prepare(`
     SELECT result
     FROM background_research_items
-    WHERE job_id = ? AND status = 'completed' AND result IS NOT NULL
+    WHERE job_id = ? AND status IN ('completed', 'quarantined') AND result IS NOT NULL
   `).bind(jobId).all();
   const outcomeTotals = (completedOutcomes.results || []).reduce((totals, item) => {
     try {
@@ -1972,6 +2222,10 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     contacts = updated.length ? updated : contacts;
   }
   const contact = contacts[0];
+  // Imported, discovered, and document-extracted recipients are validated
+  // before any personalized draft is created. Invalid contacts remain stored
+  // for correction in the quarantine view but cannot enter a campaign.
+  await validateContactBeforeDraft(String(contact.id), email);
   const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach";
   const campaign = await ensureCampaign(campaignName, "");
   if (!campaign) throw new Error("No outreach campaign is configured.");

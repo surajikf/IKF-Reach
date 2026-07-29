@@ -13,6 +13,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
+  // Starts scheduled address-validation jobs and resumes interrupted batches
+  // even when the dashboard is closed.
+  triggers: { crons: ["* * * * *"] },
   // Campaign jobs hand the next small batch back to the site's public
   // endpoint. Cloudflare requires this flag for same-zone Worker fetches.
   compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],

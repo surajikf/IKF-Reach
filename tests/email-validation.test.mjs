@@ -1,0 +1,64 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { validateEmailSignals } from "../app/lib/email-validation.ts";
+
+test("email validation rejects malformed, disposable, misspelled, and unreachable addresses", () => {
+  assert.equal(validateEmailSignals("broken-address", { reachable: false }).verdict, "invalid");
+  assert.equal(validateEmailSignals("person@mailinator.com", { reachable: true }).verdict, "invalid");
+  assert.equal(validateEmailSignals("person@gamil.com", { reachable: true }).verdict, "invalid");
+  assert.equal(validateEmailSignals("person@example.invalid", { reachable: false }).verdict, "invalid");
+});
+
+test("delivery history and role inboxes influence the verdict", () => {
+  const delivered = validateEmailSignals("person@example.com", { reachable: true, mxRecords: ["10 mx.example.com."] }, { delivered: true });
+  const hardBounce = validateEmailSignals("person@example.com", { reachable: true }, { hardBounce: true });
+  const roleInbox = validateEmailSignals("info@example.com", { reachable: true });
+  assert.equal(delivered.verdict, "valid");
+  assert.equal(hardBounce.verdict, "invalid");
+  assert.equal(roleInbox.verdict, "risky");
+});
+
+test("temporary DNS uncertainty is surfaced instead of guessed", () => {
+  const result = validateEmailSignals("person@example.com", { reachable: null, error: "timeout" });
+  assert.equal(result.verdict, "unknown");
+  assert.match(result.reasons.join(" "), /could not be confirmed/i);
+});
+
+const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const control = await readFile(new URL("../app/api/control/route.ts", import.meta.url), "utf8");
+const validationApi = await readFile(new URL("../app/api/email-validation/route.ts", import.meta.url), "utf8");
+const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+
+test("contacts UI exposes validation, scheduling, progress, and quarantine", () => {
+  assert.match(page, /Validate emails/);
+  assert.match(page, /Schedule validation/);
+  assert.match(page, /Quarantined/);
+  assert.match(page, /No probe email is sent/);
+  assert.match(page, /Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent/);
+});
+
+test("document and website contacts are validated before drafts are created", () => {
+  assert.match(control, /await validateContactBeforeDraft\(String\(contact\.id\), email\)/);
+  assert.match(control, /Email quarantined before draft generation/);
+  assert.match(control, /status = 'quarantined'/);
+  assert.match(control, /contactsFound: 1, draftsCreated: 0, quarantined: true/);
+});
+
+test("all approval and delivery paths enforce validation", () => {
+  assert.match(control, /This address has not completed email validation/);
+  assert.match(control, /\["invalid", "unknown"\]\.includes/);
+  assert.ok((control.match(/await assertContactsDeliverable/g) || []).length >= 9);
+  assert.match(control, /event IN \('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed'\)/);
+});
+
+test("validation runs in durable batches and can be scheduled while the browser is closed", () => {
+  assert.match(validationApi, /LIMIT 50/);
+  assert.match(validationApi, /email_domain_validation_cache/);
+  assert.match(validationApi, /cloudflare-dns\.com\/dns-query/);
+  assert.match(worker, /async scheduled/);
+  assert.match(worker, /runEmailValidationBatch/);
+  assert.match(worker, /kickNextEmailValidationBatch/);
+  assert.match(vite, /crons: \["\* \* \* \* \*"\]/);
+});

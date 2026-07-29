@@ -15,6 +15,13 @@
       "when": 1785310192007,
       "tag": "0001_groovy_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785332781590,
+      "tag": "0002_outgoing_guardsmen",
+      "breakpoints": true
     }
   ]
 }

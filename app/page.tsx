@@ -14,6 +14,10 @@ type ActivityRecord = { id?: string | number; action: string; company?: string |
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
 type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
 type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; retryItems?: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
+type ValidationVerdict = "valid" | "risky" | "invalid" | "unknown";
+type ValidationResult = { contactId: string; email: string; verdict: ValidationVerdict; score: number; syntaxValid: boolean; domainReachable: boolean | null; roleBased: boolean; disposable: boolean; previousHardBounce: boolean; previousSoftBounce: boolean; previousDelivered: boolean; complaint: boolean; unsubscribed: boolean; reasons: string[]; mxRecords: string[]; validatedAt: string };
+type ValidationJob = { id: string; status: string; scheduledFor?: string | null; totalItems: number; processedItems: number; validItems: number; riskyItems: number; invalidItems: number; unknownItems: number; failedItems: number; lastError?: string | null; createdAt: string; startedAt?: string | null; completedAt?: string | null; updatedAt: string };
+type ValidationData = { ok: boolean; canManage?: boolean; jobs?: ValidationJob[]; results?: ValidationResult[]; summary?: { checked: number; valid: number; risky: number; invalid: number; unknown: number }; refreshedAt?: string; error?: string };
 type ControlData = {
   ok: boolean;
   canManage?: boolean;
@@ -142,6 +146,19 @@ function StatusPill({ value }: { value?: string | null }) {
   return <span className={`status-pill ${statusTone(value)}`}>{prettyStatus(value)}</span>;
 }
 
+function ValidationPill({ result }: { result?: ValidationResult }) {
+  if (!result) return <span className="validation-pill unchecked">Not checked</span>;
+  const label = result.verdict === "invalid" ? "Quarantined" : prettyStatus(result.verdict);
+  return (
+    <span
+      className={`validation-pill ${result.verdict}`}
+      title={result.reasons.join(" • ") || `Validation score ${result.score}`}
+    >
+      {label} <small>{result.score}</small>
+    </span>
+  );
+}
+
 function Metric({ label, value, note, tone }: { label: string; value: number; note: string; tone: string }) {
   return (
     <article className="metric-card">
@@ -250,6 +267,11 @@ Please let me know a suitable time to connect.`,
   const [contactPageSize, setContactPageSize] = useState(50);
   const [contactIndustry, setContactIndustry] = useState("all");
   const [companyIndustry, setCompanyIndustry] = useState("all");
+  const [validationData, setValidationData] = useState<ValidationData | null>(null);
+  const [validationFilter, setValidationFilter] = useState<"all" | ValidationVerdict | "unchecked">("all");
+  const [validationPanelOpen, setValidationPanelOpen] = useState(false);
+  const [validationScheduleMode, setValidationScheduleMode] = useState<"now" | "schedule">("now");
+  const [validationScheduledFor, setValidationScheduledFor] = useState("");
   const backgroundKickoffsRef = useRef(new Map<string, number>());
   const pageSize = 20;
   const companyPageSize = 18;
@@ -267,7 +289,16 @@ Please let me know a suitable time to connect.`,
     }
   }
 
-  useEffect(() => { loadControl(); }, []);
+  async function loadValidation() {
+    try {
+      const response = await fetch("/api/email-validation");
+      setValidationData(await response.json());
+    } catch {
+      setValidationData({ ok: false, error: "Unable to load email validation status." });
+    }
+  }
+
+  useEffect(() => { loadControl(); loadValidation(); }, []);
 
   useEffect(() => {
     const available = control?.availableSenders || [];
@@ -286,6 +317,13 @@ Please let me know a suitable time to connect.`,
     const timer = window.setInterval(loadControl, 3000);
     return () => window.clearInterval(timer);
   }, [control?.jobs]);
+
+  useEffect(() => {
+    const active = (validationData?.jobs || []).some((job) => ["scheduled", "queued", "running"].includes(job.status));
+    if (!active) return;
+    const timer = window.setInterval(loadValidation, 3000);
+    return () => window.clearInterval(timer);
+  }, [validationData?.jobs]);
 
   useEffect(() => {
     const now = Date.now();
@@ -343,6 +381,71 @@ Please let me know a suitable time to connect.`,
     }
   }
 
+  async function startEmailValidation() {
+    setWorking(true);
+    setNotice("");
+    try {
+      let scheduledFor: string | null = null;
+      if (validationScheduleMode === "schedule") {
+        const scheduledDate = new Date(validationScheduledFor);
+        if (!validationScheduledFor || Number.isNaN(scheduledDate.getTime())) {
+          throw new Error("Choose a valid date and time for the validation.");
+        }
+        if (scheduledDate.getTime() <= Date.now()) {
+          throw new Error("Choose a future date and time for the validation.");
+        }
+        scheduledFor = scheduledDate.toISOString();
+      }
+      const response = await fetch("/api/email-validation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "queue", scheduledFor }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Email validation could not be queued.");
+      if (!scheduledFor) {
+        void fetch("/api/background-email-validation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId: result.jobId }),
+        });
+      }
+      setValidationPanelOpen(false);
+      setValidationScheduledFor("");
+      setNoticeTone("success");
+      setNotice(scheduledFor
+        ? `Email validation is scheduled for ${new Date(scheduledFor).toLocaleString("en-IN")}. It will run with the dashboard closed.`
+        : `${result.totalItems} contacts were queued for validation. No validation email will be sent.`);
+      await loadValidation();
+    } catch (error) {
+      setNoticeTone("error");
+      setNotice(error instanceof Error ? error.message : "Email validation failed.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function cancelEmailValidation(jobId: string) {
+    setWorking(true);
+    try {
+      const response = await fetch("/api/email-validation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "cancel", jobId }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Validation could not be stopped.");
+      setNoticeTone("success");
+      setNotice("Email validation was stopped. Completed results were preserved.");
+      await loadValidation();
+    } catch (error) {
+      setNoticeTone("error");
+      setNotice(error instanceof Error ? error.message : "Validation could not be stopped.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const displayEmails = useMemo<EmailRecord[]>(() => Array.isArray(control?.liveEmails) ? control.liveEmails : data.emails as EmailRecord[], [control?.liveEmails]);
   const displayContacts = useMemo<ContactRecord[]>(() => Array.isArray(control?.liveContacts) ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
   const displayCompanies = useMemo<CompanyRecord[]>(() => Array.isArray(control?.liveCompanies) ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
@@ -351,13 +454,33 @@ Please let me know a suitable time to connect.`,
     () => [...new Set([...industryDomains, ...displayCompanies.map((company) => company.industry || "").filter(Boolean)])].sort((a, b) => a.localeCompare(b)),
     [displayCompanies],
   );
+  const validationByContact = useMemo(
+    () => new Map((validationData?.results || []).map((result) => [result.contactId, result])),
+    [validationData?.results],
+  );
+  const activeValidationJob = useMemo(
+    () => (validationData?.jobs || []).find((job) => ["scheduled", "queued", "running"].includes(job.status)),
+    [validationData?.jobs],
+  );
+  const validationCounts = useMemo(() => {
+    const counts = { all: displayContacts.length, valid: 0, risky: 0, invalid: 0, unknown: 0, unchecked: 0 };
+    for (const contact of displayContacts) {
+      const verdict = validationByContact.get(contact.id)?.verdict;
+      if (verdict) counts[verdict] += 1;
+      else counts.unchecked += 1;
+    }
+    return counts;
+  }, [displayContacts, validationByContact]);
   const filteredContacts = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayContacts.filter((contact) => {
       const matchesIndustry = contactIndustry === "all" || (contact.industry || "") === contactIndustry;
-      return matchesIndustry && (!term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
+      const verdict = validationByContact.get(contact.id)?.verdict;
+      const matchesValidation = validationFilter === "all"
+        || (validationFilter === "unchecked" ? !verdict : verdict === validationFilter);
+      return matchesIndustry && matchesValidation && (!term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
     });
-  }, [displayContacts, search, contactIndustry]);
+  }, [displayContacts, search, contactIndustry, validationByContact, validationFilter]);
   const contactPages = Math.max(1, Math.ceil(filteredContacts.length / contactPageSize));
   const safeContactPage = Math.min(contactPage, contactPages);
   const pagedContacts = filteredContacts.slice((safeContactPage - 1) * contactPageSize, safeContactPage * contactPageSize);
@@ -1630,17 +1753,66 @@ Please let me know a suitable time to connect.`,
           {section === "contacts" && (
             <section className="panel data-panel">
               <div className="panel-heading">
-                <div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div>
+                <div><p className="eyebrow">Audience safety</p><h2>{displayContacts.length} contacts</h2><span className="panel-subcopy">Validate before creating drafts or sending campaigns.</span></div>
                 <div className="contact-list-controls">
-                  <span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span>
                   <label><span>Industry</span><select value={contactIndustry} onChange={(event) => { setContactIndustry(event.target.value); setContactPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label>
                   <label><span>Rows per page</span><select value={contactPageSize} onChange={(event) => { setContactPageSize(Number(event.target.value)); setContactPage(1); }}><option value={50}>50</option><option value={100}>100</option><option value={1000}>1,000</option></select></label>
+                  <button type="button" className="primary-action validate-email-button" disabled={!control?.canManage || working || Boolean(activeValidationJob)} onClick={() => setValidationPanelOpen(true)} title={control?.canManage ? "Validate contacts without sending probe emails" : "Sign in with an authorized IKF account"}>
+                    {activeValidationJob ? "Validation active" : "Validate emails"}
+                  </button>
                 </div>
               </div>
-              <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
-                {pagedContacts.map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>)}
+
+              <div className="validation-tabs" role="tablist" aria-label="Filter contacts by validation status">
+                {([
+                  ["all", "All", validationCounts.all],
+                  ["valid", "Valid", validationCounts.valid],
+                  ["risky", "Risky", validationCounts.risky],
+                  ["invalid", "Quarantined", validationCounts.invalid],
+                  ["unknown", "Unknown", validationCounts.unknown],
+                  ["unchecked", "Not checked", validationCounts.unchecked],
+                ] as const).map(([value, label, count]) => (
+                  <button type="button" role="tab" aria-selected={validationFilter === value} className={validationFilter === value ? "active" : ""} key={value} onClick={() => { setValidationFilter(value); setContactPage(1); }}>
+                    {label}<b>{count.toLocaleString("en-IN")}</b>
+                  </button>
+                ))}
+              </div>
+
+              {activeValidationJob && (
+                <div className={`validation-job ${activeValidationJob.status}`}>
+                  <div className="validation-job-heading">
+                    <div>
+                      <p className="eyebrow">Email validation</p>
+                      <h3>{activeValidationJob.status === "scheduled" ? "Scheduled validation" : "Validating contacts in the background"}</h3>
+                      <span>{activeValidationJob.status === "scheduled" && activeValidationJob.scheduledFor ? `Starts ${new Date(activeValidationJob.scheduledFor).toLocaleString("en-IN")}` : `${activeValidationJob.processedItems.toLocaleString("en-IN")} of ${activeValidationJob.totalItems.toLocaleString("en-IN")} checked`}</span>
+                    </div>
+                    <button type="button" className="danger-outline" disabled={working || !control?.canManage} onClick={() => cancelEmailValidation(activeValidationJob.id)}>Stop</button>
+                  </div>
+                  <div className="validation-progress" aria-label="Validation progress"><span style={{ width: `${activeValidationJob.totalItems ? Math.min(100, (activeValidationJob.processedItems / activeValidationJob.totalItems) * 100) : 0}%` }} /></div>
+                  <div className="validation-job-metrics">
+                    <span><b>{activeValidationJob.validItems}</b> Valid</span><span><b>{activeValidationJob.riskyItems}</b> Risky</span><span><b>{activeValidationJob.invalidItems}</b> Quarantined</span><span><b>{activeValidationJob.unknownItems}</b> Unknown</span><span><b>{activeValidationJob.failedItems}</b> Could not check</span>
+                  </div>
+                </div>
+              )}
+
+              {validationPanelOpen && !activeValidationJob && (
+                <div className="validation-setup">
+                  <div><p className="eyebrow">Safe validation</p><h3>Check all contacts before the next campaign</h3><p>Checks email format, domain and MX records, disposable domains, role inboxes, and previous Brevo delivery history. No probe email is sent.</p></div>
+                  <div className="validation-mode" role="group" aria-label="Validation timing"><button type="button" className={validationScheduleMode === "now" ? "active" : ""} onClick={() => setValidationScheduleMode("now")}>Run now</button><button type="button" className={validationScheduleMode === "schedule" ? "active" : ""} onClick={() => setValidationScheduleMode("schedule")}>Schedule</button></div>
+                  {validationScheduleMode === "schedule" && <label className="validation-date"><span>Start date and time</span><input type="datetime-local" value={validationScheduledFor} onChange={(event) => setValidationScheduledFor(event.target.value)} /></label>}
+                  <div className="validation-setup-actions"><button type="button" onClick={() => setValidationPanelOpen(false)}>Cancel</button><button type="button" className="primary-action" disabled={working || !control?.canManage} onClick={startEmailValidation}>{working ? "Queuing…" : validationScheduleMode === "schedule" ? "Schedule validation" : "Validate all contacts"}</button></div>
+                </div>
+              )}
+
+              <div className="validation-policy-note"><strong>Validation-first campaign protection</strong><span>New addresses from documents, websites, or pasted lists are validated before a draft is created. Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent.</span></div>
+
+              <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
+                {pagedContacts.map((contact) => {
+                  const validation = validationByContact.get(contact.id);
+                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
+                })}
               </tbody></table></div>
-              {!pagedContacts.length && <div className="empty-state">No contacts match your search.</div>}
+              {!pagedContacts.length && <div className="empty-state">{validationFilter === "invalid" ? "No quarantined contacts." : "No contacts match your filters."}</div>}
               <div className="pagination">
                 <span>{filteredContacts.length ? `Showing ${(safeContactPage - 1) * contactPageSize + 1}–${Math.min(safeContactPage * contactPageSize, filteredContacts.length)} of ${filteredContacts.length} contacts` : "0 contacts"} · Page {safeContactPage} of {contactPages}</span>
                 <div><button disabled={safeContactPage === 1} onClick={() => setContactPage(Math.max(1, safeContactPage - 1))}>Previous</button><button disabled={safeContactPage === contactPages} onClick={() => setContactPage(Math.min(contactPages, safeContactPage + 1))}>Next</button></div>

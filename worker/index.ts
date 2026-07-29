@@ -20,6 +20,11 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+interface ScheduledController {
+  scheduledTime: number;
+  cron: string;
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -98,6 +103,24 @@ const worker = {
       return Response.json({ ok: true, accepted: true, jobId, ...progress }, { status: 202 });
     }
 
+    if (url.pathname === "/api/background-email-validation" && request.method === "POST") {
+      let body: { jobId?: string };
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ ok: false, error: "Invalid email validation request." }, { status: 400 });
+      }
+      const jobId = String(body.jobId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+        return Response.json({ ok: false, error: "A valid validation job is required." }, { status: 400 });
+      }
+      const progress = await runEmailValidationBatch(request.url, jobId, env, ctx);
+      if (Number(progress.remaining || 0) > 0) {
+        ctx.waitUntil(kickNextEmailValidationBatch(request.url, jobId, env.SUPABASE_SECRET_KEY));
+      }
+      return Response.json({ ok: true, accepted: true, jobId, ...progress }, { status: 202 });
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
@@ -110,6 +133,21 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const dueJobs = await env.DB.prepare(`
+      SELECT id
+      FROM email_validation_jobs
+      WHERE (
+        status = 'scheduled' AND scheduled_for <= ?
+      ) OR status IN ('queued', 'running')
+      ORDER BY created_at ASC
+      LIMIT 4
+    `).bind(new Date().toISOString()).all<{ id: string }>();
+    for (const job of dueJobs.results || []) {
+      ctx.waitUntil(runEmailValidationBatch("https://scheduled.ikf.local", job.id, env, ctx));
+    }
   },
 };
 
@@ -156,6 +194,40 @@ async function kickNextBackgroundBatch(requestUrl: string, jobId: string, token:
     method: "POST",
     headers: workerHeaders,
     body: JSON.stringify({ jobId, refreshDrafts: false }),
+  });
+}
+
+async function runEmailValidationBatch(
+  requestUrl: string,
+  jobId: string,
+  env: Env,
+  ctx: ExecutionContext,
+) {
+  const validationRequest = new Request(new URL("/api/email-validation", requestUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-ikf-validation-job": jobId,
+      "x-ikf-validation-token": env.SUPABASE_SECRET_KEY || "",
+    },
+    body: JSON.stringify({ action: "process", jobId }),
+  });
+  const response = await handler.fetch(validationRequest, env, ctx);
+  if (!response.ok) {
+    return { remaining: 0, error: await response.text() };
+  }
+  return response.json() as Promise<{ remaining?: number; status?: string }>;
+}
+
+async function kickNextEmailValidationBatch(requestUrl: string, jobId: string, token: string) {
+  await fetch(new URL("/api/background-email-validation", requestUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-ikf-validation-job": jobId,
+      "x-ikf-validation-token": token || "",
+    },
+    body: JSON.stringify({ jobId }),
   });
 }
 

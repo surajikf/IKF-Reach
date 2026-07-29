@@ -775,6 +775,46 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .contact-list-controls label { display: flex; align-items: center; gap: 8px; color: #626b77; font-size: 13px; font-weight: 700; }
 .contact-list-controls select { min-width: 84px; min-height: 40px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); font-size: 14px; }
 .contact-list-controls label:first-of-type select { min-width: 190px; }
+.panel-subcopy { display: block; margin-top: 6px; color: var(--muted); font-size: 14px; }
+.validate-email-button { min-height: 42px; white-space: nowrap; }
+.validation-tabs { display: flex; gap: 8px; padding: 14px 20px; overflow-x: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #fbfcfe; scrollbar-width: thin; }
+.validation-tabs button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: #47515e; font-weight: 700; white-space: nowrap; }
+.validation-tabs button b { min-width: 24px; padding: 2px 7px; border-radius: 999px; background: #eef0f4; color: #667080; font-size: 12px; text-align: center; }
+.validation-tabs button.active { border-color: #7566ff; background: #f1efff; color: #4c3fe0; box-shadow: 0 0 0 1px #7566ff inset; }
+.validation-tabs button.active b { background: #ddd8ff; color: #4433d6; }
+.validation-job, .validation-setup { margin: 18px 20px 0; padding: 18px; border: 1px solid #cdc7ff; border-radius: 14px; background: #f8f7ff; }
+.validation-job-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.validation-job-heading h3, .validation-setup h3 { margin: 4px 0 5px; font-size: 19px; }
+.validation-job-heading span, .validation-setup p { color: var(--muted); font-size: 14px; line-height: 1.5; }
+.validation-progress { width: 100%; height: 8px; margin: 16px 0 12px; overflow: hidden; border-radius: 99px; background: #e4e1fb; }
+.validation-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #5c4be5, #8c7cff); transition: width .25s ease; }
+.validation-job-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.validation-job-metrics span { padding: 10px; border: 1px solid #e0ddf8; border-radius: 9px; background: #fff; color: #69717d; font-size: 12px; }
+.validation-job-metrics b { display: block; margin-bottom: 2px; color: var(--ink); font-size: 17px; }
+.validation-setup { display: grid; grid-template-columns: minmax(260px, 1fr) auto minmax(220px, auto); align-items: end; gap: 18px; }
+.validation-setup > div:first-child { align-self: center; }
+.validation-setup > div:first-child p:last-child { max-width: 680px; margin: 6px 0 0; }
+.validation-mode { display: flex; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.validation-mode button { min-height: 38px; padding: 8px 15px; border: 0; border-radius: 7px; background: transparent; color: #596371; font-weight: 700; }
+.validation-mode button.active { background: #5c4be5; color: #fff; }
+.validation-date { display: flex; flex-direction: column; gap: 6px; color: #4c5664; font-size: 13px; font-weight: 700; }
+.validation-date input { min-height: 46px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); font: inherit; }
+.validation-setup-actions { display: flex; justify-content: flex-end; gap: 10px; grid-column: 1 / -1; padding-top: 14px; border-top: 1px solid #e0ddf8; }
+.validation-setup-actions button { min-height: 42px; padding: 8px 16px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-weight: 700; }
+.validation-setup-actions .primary-action { border-color: #5c4be5; background: #5c4be5; color: #fff; }
+.validation-policy-note { display: flex; align-items: center; gap: 14px; margin: 16px 20px; padding: 13px 15px; border: 1px solid #bfe7d8; border-radius: 12px; background: #effaf6; }
+.validation-policy-note strong { color: #146c50; white-space: nowrap; }
+.validation-policy-note span { color: #426258; font-size: 13px; line-height: 1.45; }
+.validation-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 999px; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.validation-pill small { font-size: 11px; opacity: .75; }
+.validation-pill.valid { background: #e5f7ef; color: #087654; }
+.validation-pill.risky { background: #fff3d9; color: #9b5c00; }
+.validation-pill.invalid { background: #fde8ec; color: #b3263c; }
+.validation-pill.unknown, .validation-pill.unchecked { background: #eef0f3; color: #5e6875; }
+.validation-reason { display: block; max-width: 190px; margin-top: 6px; color: #7d8692; font-size: 11px; line-height: 1.3; }
+.contacts-table tr.quarantined-row td { background: #fff8f9; }
+.contacts-table tr.quarantined-row td:first-child { box-shadow: 3px 0 0 #d84157 inset; }
+.danger-outline { min-height: 40px; padding: 8px 15px; border: 1px solid #dc6574; border-radius: 9px; background: #fff; color: #be243b; font-weight: 800; }
 
 @media (max-width: 1280px) {
   .app-shell { grid-template-columns: 232px minmax(0, 1fr); }
@@ -806,6 +846,11 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 @media (max-width: 760px) {
   .contact-list-controls { width: 100%; align-items: stretch; justify-content: space-between; }
   .contact-list-controls label { justify-content: flex-end; }
+  .validation-job-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .validation-setup { grid-template-columns: 1fr; }
+  .validation-setup-actions { grid-column: auto; }
+  .validation-policy-note { align-items: flex-start; flex-direction: column; }
+  .validation-policy-note strong { white-space: normal; }
   .campaign-delete-confirmation > div { display: grid; grid-template-columns: 1fr; }
   .company-profile-summary { grid-template-columns: 1fr; }
   .company-profile-summary span { border-right: 0; border-bottom: 1px solid var(--line); }
