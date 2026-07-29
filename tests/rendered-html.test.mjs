@@ -9,6 +9,7 @@ const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "u
 const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
 const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", import.meta.url), "utf8");
 const webhookApi = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
+const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 
 test("campaign creation exposes durable background research and verified sender selection", () => {
   assert.match(page, /Save as draft campaign/);
@@ -37,8 +38,21 @@ test("contact documents queue every valid record and retain PDF organization con
 
 test("worker continues campaign research independently of the browser", () => {
   assert.match(worker, /ctx\.waitUntil\(runBackgroundCampaignBatch/);
+  assert.match(worker, /handler\.fetch\(controlRequest\(\), env, ctx\)/);
   assert.match(worker, /x-ikf-background-token/);
   assert.match(worker, /\/api\/background-campaign/);
+  assert.match(viteConfig, /global_fetch_strictly_public/);
+});
+
+test("generated drafts enforce the requested selective email formatting", () => {
+  assert.match(api, /font-family:Calibri,Arial,sans-serif;font-size:11pt/);
+  assert.match(api, /company: `<strong><u>/);
+  assert.match(api, /emphasizeLeadingTitle/);
+  assert.match(api, /emphasizeImportantKeywords/);
+  assert.match(api, /normalizeAiStyle/);
+  assert.match(api, /safe\.split\(`IKFPERSONALIZATIONTOKEN/);
+  assert.match(api, /refreshBackgroundCampaignDraftFormatting/);
+  assert.match(api, /sent_and_scheduled_excluded: true/);
 });
 
 test("contacts and companies paginate their complete filtered datasets independently", () => {

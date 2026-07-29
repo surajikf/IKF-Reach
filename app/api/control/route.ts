@@ -109,10 +109,10 @@ function draftHtml(input: { email: string; name?: string; company: string; brief
   const context = input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`;
   const focusAreas = input.research?.focusAreas?.length ? input.research.focusAreas.slice(0, 3).join(", ") : "productivity, knowledge workflows, and stakeholder engagement";
   const topicTemplate = input.topic?.trim() || "AI Native Thinking Masterclass";
-  const topic = cleanPersonalizedSubject(replacePersonalizationPlaceholders(topicTemplate, {
+  const topic = normalizeAiStyle(cleanPersonalizedSubject(replacePersonalizationPlaceholders(topicTemplate, {
     name,
     company: input.company,
-  })) || "AI Native Thinking Masterclass";
+  }))) || "Ai Native Thinking Masterclass";
   const template = String(input.template || "").trim();
   const usesPersonalization = hasPersonalizationPlaceholder(template);
   const defaultTemplate = `Dear {{name}},
@@ -1522,6 +1522,11 @@ async function processBackgroundCampaignBatch(jobId: string) {
   if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(job.status))) {
     return { jobId, status: job.status, remaining: 0, completedItems: Number(job.completed_items || 0), totalItems: Number(job.total_items || 0) };
   }
+  // Refresh the small set of drafts created before the current formatting
+  // rules. Sent and scheduled messages are never eligible for this update.
+  if (Number(job.completed_items || 0) <= 3 && Number(job.drafts_created || 0) <= 3) {
+    await refreshBackgroundCampaignDraftFormatting(job);
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -1734,6 +1739,88 @@ async function assertBackgroundJobActive(jobId: string) {
   }
 }
 
+async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>) {
+  const campaignId = String(job.campaign_id || "");
+  if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return 0;
+  const drafts = await db(
+    `generated_emails?select=id,contact_id,company_id,status,personalization_data&campaign_id=eq.${encodeURIComponent(campaignId)}&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=10`,
+  );
+  if (!drafts.length) return 0;
+
+  const contactIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
+  const companyIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.company_id || "")).filter(Boolean))];
+  const [contacts, companies, campaigns] = await Promise.all([
+    contactIds.length ? db(`contacts?select=id,email,full_name&id=in.(${contactIds.join(",")})`) : Promise.resolve([]),
+    companyIds.length ? db(`companies?select=id,name&id=in.(${companyIds.join(",")})`) : Promise.resolve([]),
+    db(`campaigns?select=id,sender_name&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
+  ]);
+  const contactById = new Map(contacts.map((contact: Record<string, any>) => [String(contact.id), contact]));
+  const companyById = new Map(companies.map((company: Record<string, any>) => [String(company.id), company]));
+  const senderName = String(campaigns[0]?.sender_name || sender.name);
+  const formattedAt = new Date().toISOString();
+  let updated = 0;
+
+  for (const group of chunk(drafts, 10)) {
+    const changes = group.flatMap((draft: Record<string, any>) => {
+      const contact = contactById.get(String(draft.contact_id));
+      const company = companyById.get(String(draft.company_id));
+      if (!contact?.email || !company?.name) return [];
+      const existing = draft.personalization_data && typeof draft.personalization_data === "object"
+        ? draft.personalization_data
+        : {};
+      const html = draftHtml({
+        email: String(contact.email),
+        name: contact.full_name || undefined,
+        company: String(company.name),
+        brief: String(existing.research_summary || job.brief || ""),
+        topic: String(job.topic || "AI Native Thinking Masterclass"),
+        template: String(job.email_template || ""),
+        senderName,
+      });
+      return [{
+        id: String(draft.id),
+        html,
+        personalization: {
+          ...existing,
+          email_font: "Calibri",
+          email_font_size: "11pt",
+          bold_underline_organization: true,
+          selective_bold_titles: true,
+          important_keywords_bold: true,
+          formatting_version: 3,
+          formatting_refreshed_at: formattedAt,
+        },
+      }];
+    });
+    await Promise.all(changes.map((change) =>
+      db(`generated_emails?id=eq.${change.id}&status=in.(draft_pending_review,approved)`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          html_body: change.html,
+          personalization_data: change.personalization,
+        }),
+      })
+    ));
+    updated += changes.length;
+  }
+  if (updated) {
+    await db("activity_log", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "campaign_draft_formatting_refreshed",
+        details: {
+          campaign_id: campaignId,
+          campaign_name: job.campaign_name,
+          updated_drafts: updated,
+          sent_and_scheduled_excluded: true,
+          format: "Calibri 11pt with selective bold titles and bold-underlined organization",
+        },
+      }),
+    });
+  }
+  return updated;
+}
+
 async function createDraftRecord(input: Record<string, any>, user: string) {
   const email = String(input.email || "").trim().toLowerCase();
   if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error("A valid email address is required.");
@@ -1807,12 +1894,12 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     return { draft: existing[0], company, contact, research, skipped: true };
   }
   const topic = String(input.topic || "AI Native Thinking Masterclass").trim();
-  const personalizedSubject = renderPersonalizedSubject(topic, {
+  const personalizedSubject = normalizeAiStyle(renderPersonalizedSubject(topic, {
     name: greetingName(email, input.name),
     company: companyName,
     industry: companyIndustry,
     website: website || "",
-  });
+  }));
   const campaignSender = {
     name: String(campaign.sender_name || sender.name),
     email: String(campaign.sender_email || sender.email),
@@ -2227,12 +2314,12 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
     markedValues[key] = marker;
   });
   const withTokens = replacePersonalizationPlaceholders(template, markedValues);
-  let safe = escapeHtml(cleanupTemplateText(withTokens));
+  let safe = escapeHtml(normalizeAiStyle(cleanupTemplateText(withTokens)));
   tokens.forEach((value, index) => {
-    safe = safe.replace(`IKFPERSONALIZATIONTOKEN${index}END`, value);
+    safe = safe.split(`IKFPERSONALIZATIONTOKEN${index}END`).join(value);
   });
   safe = safe.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  return cleanupUnresolvedHtml(safe
+  const rendered = safe
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean)
@@ -2241,9 +2328,36 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
       if (lines.length && lines.every((line) => /^[-•*]\s+/.test(line))) {
         return `<ul>${lines.map((line) => `<li>${line.replace(/^[-•*]\s+/, "")}</li>`).join("")}</ul>`;
       }
-      return `<p>${lines.join("<br>")}</p>`;
+      return `<p>${lines.map(emphasizeLeadingTitle).join("<br>")}</p>`;
     })
-    .join(""));
+    .join("");
+  const selectivelyEmphasized = emphasizeImportantKeywords(rendered)
+    .replace(/<li>([^:<>]{2,90}):(?=\s|&nbsp;|$)/gi, "<li><strong>$1</strong>");
+  return cleanupUnresolvedHtml(selectivelyEmphasized);
+}
+
+function emphasizeLeadingTitle(line: string) {
+  if (!line || /^Dear(?:\s|&nbsp;)/i.test(line) || /^https?:\/\//i.test(line)) return line;
+  return line.replace(
+    /^((?!<strong\b)(?!<u\b)[^:<>]{2,90}):(?=\s|&nbsp;|$)/i,
+    "<strong>$1</strong>",
+  );
+}
+
+function emphasizeImportantKeywords(html: string) {
+  return String(html || "")
+    .split(/(<strong\b[^>]*>[\s\S]*?<\/strong>)/gi)
+    .map((segment) => /^<strong\b/i.test(segment)
+      ? segment
+      : segment.replace(
+        /\b(Ai Native Thinking Masterclass|Ai Leadership Masterclass|Ai Native Thinkers Community|Ai Native Thinking|Ai-first workflows|Responsible Ai)\b/gi,
+        "<strong>$1</strong>",
+      ))
+    .join("");
+}
+
+function normalizeAiStyle(value: string) {
+  return String(value || "").replace(/\bAI\b/g, "Ai");
 }
 
 async function extractDocumentText(document: Record<string, any>) {

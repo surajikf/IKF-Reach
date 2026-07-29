@@ -53,7 +53,7 @@ const worker = {
       if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(existingJob.status))) {
         return Response.json({ ok: true, accepted: false, jobId, status: existingJob.status }, { status: 200 });
       }
-      ctx.waitUntil(runBackgroundCampaignBatch(request.url, jobId, env.SUPABASE_SECRET_KEY));
+      ctx.waitUntil(runBackgroundCampaignBatch(request.url, jobId, env.SUPABASE_SECRET_KEY, env, ctx));
       return Response.json({ ok: true, accepted: true, jobId }, { status: 202 });
     }
 
@@ -72,24 +72,29 @@ const worker = {
   },
 };
 
-async function runBackgroundCampaignBatch(requestUrl: string, jobId: string, token: string) {
+async function runBackgroundCampaignBatch(
+  requestUrl: string,
+  jobId: string,
+  token: string,
+  env: Env,
+  ctx: ExecutionContext,
+) {
   const controlUrl = new URL("/api/control", requestUrl);
   const workerHeaders = {
     "Content-Type": "application/json",
     "x-ikf-background-job": jobId,
     ...(token ? { "x-ikf-background-token": token } : {}),
   };
-  const response = await fetch(controlUrl, {
+  const controlRequest = () => new Request(controlUrl, {
     method: "POST",
     headers: workerHeaders,
     body: JSON.stringify({ action: "process_background_campaign", jobId }),
   });
+  // Run the first batch directly through the application handler. This avoids
+  // depending on a same-zone network request for the work accepted above.
+  const response = await handler.fetch(controlRequest(), env, ctx);
   if (!response.ok) {
-    const retry = await fetch(controlUrl, {
-      method: "POST",
-      headers: workerHeaders,
-      body: JSON.stringify({ action: "process_background_campaign", jobId }),
-    });
+    const retry = await handler.fetch(controlRequest(), env, ctx);
     if (!retry.ok) return;
     const retryResult = await retry.json() as { remaining?: number };
     if (!retryResult.remaining) return;
