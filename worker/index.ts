@@ -31,7 +31,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/background-campaign" && request.method === "POST") {
-      let body: { jobId?: string; refreshDrafts?: boolean };
+      let body: { jobId?: string; refreshDrafts?: boolean; retryFailed?: boolean };
       try {
         body = await request.json();
       } catch {
@@ -41,14 +41,43 @@ const worker = {
       if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
         return Response.json({ ok: false, error: "A valid campaign job is required." }, { status: 400 });
       }
-      const existingJob = await env.DB.prepare(`
-        SELECT status
+      let existingJob = await env.DB.prepare(`
+        SELECT status, failed_items AS failedItems
         FROM background_research_jobs
         WHERE id = ?
         LIMIT 1
-      `).bind(jobId).first<{ status: string }>();
+      `).bind(jobId).first<{ status: string; failedItems: number }>();
       if (!existingJob) {
         return Response.json({ ok: false, error: "Background campaign job not found." }, { status: 404 });
+      }
+      if (body.retryFailed === true
+        && ["completed_with_issues", "failed"].includes(String(existingJob.status))
+        && Number(existingJob.failedItems || 0) > 0) {
+        const retryStartedAt = new Date().toISOString();
+        await env.DB.batch([
+          env.DB.prepare(`
+            UPDATE background_research_items
+            SET status = 'queued',
+                attempts = 1,
+                claimed_by = NULL,
+                error = CASE
+                  WHEN error IS NULL THEN 'Queued for the final automatic retry.'
+                  ELSE error || ' Final automatic retry queued.'
+                END,
+                updated_at = ?
+            WHERE job_id = ? AND status = 'failed'
+          `).bind(retryStartedAt, jobId),
+          env.DB.prepare(`
+            UPDATE background_research_jobs
+            SET status = 'researching',
+                failed_items = 0,
+                completed_at = NULL,
+                last_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+          `).bind(retryStartedAt, jobId),
+        ]);
+        existingJob = { ...existingJob, status: "researching", failedItems: 0 };
       }
       if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(existingJob.status))) {
         return Response.json({ ok: true, accepted: false, jobId, status: existingJob.status }, { status: 200 });

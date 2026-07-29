@@ -50,6 +50,8 @@ test("worker continues campaign research independently of the browser", () => {
   assert.match(worker, /const progress = await runBackgroundCampaignBatch/);
   assert.match(worker, /ctx\.waitUntil\(kickNextBackgroundBatch/);
   assert.match(worker, /handler\.fetch\(controlRequest\(\), env, ctx\)/);
+  assert.match(worker, /body\.retryFailed === true/);
+  assert.match(worker, /Final automatic retry queued/);
   assert.match(worker, /x-ikf-background-token/);
   assert.match(worker, /\/api\/background-campaign/);
   assert.match(viteConfig, /global_fetch_strictly_public/);
