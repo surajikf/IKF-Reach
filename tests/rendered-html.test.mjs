@@ -27,3 +27,12 @@ test("worker continues campaign research independently of the browser", () => {
   assert.match(worker, /x-ikf-background-token/);
   assert.match(worker, /\/api\/background-campaign/);
 });
+
+test("contacts and companies paginate their complete filtered datasets independently", () => {
+  assert.match(page, /const \[contactPage, setContactPage\] = useState\(1\)/);
+  assert.match(page, /const \[companyPage, setCompanyPage\] = useState\(1\)/);
+  assert.match(page, /const pagedContacts = filteredContacts\.slice/);
+  assert.match(page, /const pagedCompanies = filteredCompanies\.slice/);
+  assert.match(page, /Showing.*contacts/);
+  assert.match(page, /Showing.*companies/);
+});

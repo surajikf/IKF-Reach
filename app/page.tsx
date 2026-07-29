@@ -179,6 +179,8 @@ export default function Home() {
   const [emailStatus, setEmailStatus] = useState("all");
   const [emailCampaign, setEmailCampaign] = useState("all");
   const [page, setPage] = useState(1);
+  const [contactPage, setContactPage] = useState(1);
+  const [companyPage, setCompanyPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
   const [selectedContact, setSelectedContact] = useState<ContactRecord | null>(null);
   const [contactForm, setContactForm] = useState({ name: "", email: "", role: "", company: "", industry: "", website: "", country: "" });
@@ -215,6 +217,8 @@ Please let me know a suitable time to connect.`,
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
   const [campaignWorkspaceView, setCampaignWorkspaceView] = useState<CampaignWorkspaceView>("overview");
   const pageSize = 20;
+  const contactPageSize = 20;
+  const companyPageSize = 18;
 
   async function loadControl() {
     setRefreshing(true);
@@ -288,6 +292,20 @@ Please let me know a suitable time to connect.`,
   const displayContacts = useMemo<ContactRecord[]>(() => control?.liveContacts?.length ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
   const displayCompanies = useMemo<CompanyRecord[]>(() => control?.liveCompanies?.length ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
   const displayActivity = useMemo<ActivityRecord[]>(() => control?.liveActivity?.length ? control.liveActivity : data.activity as ActivityRecord[], [control?.liveActivity]);
+  const filteredContacts = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return displayContacts.filter((contact) => !term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
+  }, [displayContacts, search]);
+  const contactPages = Math.max(1, Math.ceil(filteredContacts.length / contactPageSize));
+  const safeContactPage = Math.min(contactPage, contactPages);
+  const pagedContacts = filteredContacts.slice((safeContactPage - 1) * contactPageSize, safeContactPage * contactPageSize);
+  const filteredCompanies = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return displayCompanies.filter((company) => !term || `${company.name} ${company.industry || ""} ${company.website || ""}`.toLowerCase().includes(term));
+  }, [displayCompanies, search]);
+  const companyPages = Math.max(1, Math.ceil(filteredCompanies.length / companyPageSize));
+  const safeCompanyPage = Math.min(companyPage, companyPages);
+  const pagedCompanies = filteredCompanies.slice((safeCompanyPage - 1) * companyPageSize, safeCompanyPage * companyPageSize);
   const stats = useMemo<LiveStats>(() => control?.liveStats || {
     companies: data.summary.companies,
     contacts: data.summary.contacts,
@@ -450,6 +468,8 @@ Please let me know a suitable time to connect.`,
     setMobileMenuOpen(false);
     setSearch("");
     setPage(1);
+    setContactPage(1);
+    setCompanyPage(1);
   }
 
   function openCampaignWorkspace(view: CampaignWorkspaceView, campaignName?: string) {
@@ -752,7 +772,7 @@ Please let me know a suitable time to connect.`,
           <div className="top-actions">
             <label className="global-search">
               <span aria-hidden="true">⌕</span>
-              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search records" aria-label="Search records" />
+              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setContactPage(1); setCompanyPage(1); }} placeholder="Search records" aria-label="Search records" />
             </label>
             <button className="refresh-button" onClick={loadControl} disabled={refreshing} aria-label="Refresh live dashboard data">{refreshing ? "Refreshing…" : "Refresh"}</button>
             <div className="avatar" aria-label="Tanishka">T</div>
@@ -1274,8 +1294,13 @@ Please let me know a suitable time to connect.`,
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div><span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span></div>
               <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
-                {displayContacts.filter((contact) => !search || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>)}
+                {pagedContacts.map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>)}
               </tbody></table></div>
+              {!pagedContacts.length && <div className="empty-state">No contacts match your search.</div>}
+              <div className="pagination">
+                <span>{filteredContacts.length ? `Showing ${(safeContactPage - 1) * contactPageSize + 1}–${Math.min(safeContactPage * contactPageSize, filteredContacts.length)} of ${filteredContacts.length} contacts` : "0 contacts"} · Page {safeContactPage} of {contactPages}</span>
+                <div><button disabled={safeContactPage === 1} onClick={() => setContactPage(Math.max(1, safeContactPage - 1))}>Previous</button><button disabled={safeContactPage === contactPages} onClick={() => setContactPage(Math.min(contactPages, safeContactPage + 1))}>Next</button></div>
+              </div>
             </section>
           )}
 
@@ -1283,7 +1308,12 @@ Please let me know a suitable time to connect.`,
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><span>Deduplicated by domain</span></div>
               <div className="company-grid">
-                {displayCompanies.filter((company) => !search || `${company.name} ${company.industry || ""} ${company.website || ""}`.toLowerCase().includes(search.toLowerCase())).slice(0, 100).map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></article>)}
+                {pagedCompanies.map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></article>)}
+              </div>
+              {!pagedCompanies.length && <div className="empty-state">No companies match your search.</div>}
+              <div className="pagination">
+                <span>{filteredCompanies.length ? `Showing ${(safeCompanyPage - 1) * companyPageSize + 1}–${Math.min(safeCompanyPage * companyPageSize, filteredCompanies.length)} of ${filteredCompanies.length} companies` : "0 companies"} · Page {safeCompanyPage} of {companyPages}</span>
+                <div><button disabled={safeCompanyPage === 1} onClick={() => setCompanyPage(Math.max(1, safeCompanyPage - 1))}>Previous</button><button disabled={safeCompanyPage === companyPages} onClick={() => setCompanyPage(Math.min(companyPages, safeCompanyPage + 1))}>Next</button></div>
               </div>
             </section>
           )}
