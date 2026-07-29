@@ -1538,7 +1538,7 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
 
   const now = new Date();
   const nowIso = now.toISOString();
-  const staleBefore = new Date(now.getTime() - 5 * 60_000).toISOString();
+  const staleBefore = new Date(now.getTime() - 45_000).toISOString();
   const estimatedRemaining = Math.max(
     0,
     Number(job.total_items || 0) - Number(job.completed_items || 0),

@@ -23,6 +23,7 @@ test("server queues campaign sources and processes them in bounded batches", () 
   assert.match(api, /queue_background_campaign/);
   assert.match(api, /process_background_campaign/);
   assert.match(api, /const batchLimit = estimatedRemaining > 200 \? 50 : estimatedRemaining > 50 \? 25 : 12/);
+  assert.match(api, /now\.getTime\(\) - 45_000/);
   assert.match(api, /LIMIT \?/);
   assert.match(api, /suppliedWebsites\.length > 50/);
   assert.doesNotMatch(api, /parsedContacts\.length > 50/);
@@ -38,6 +39,10 @@ test("contact documents queue every valid record and retain PDF organization con
 });
 
 test("worker continues campaign research independently of the browser", () => {
+  assert.match(page, /Live campaign generation/);
+  assert.match(page, /Unique emails created/);
+  assert.match(page, /Duplicates \/ existing skipped/);
+  assert.match(page, /All database contacts/);
   assert.match(worker, /const progress = await runBackgroundCampaignBatch/);
   assert.match(worker, /ctx\.waitUntil\(kickNextBackgroundBatch/);
   assert.match(worker, /handler\.fetch\(controlRequest\(\), env, ctx\)/);

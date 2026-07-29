@@ -975,7 +975,7 @@ Please let me know a suitable time to connect.`,
               <section className="metric-grid" aria-label="Outreach totals">
                 <Metric label="Generated emails" value={stats.emails} note={`Across ${displayCampaigns.length} campaigns`} tone="violet" />
                 <Metric label="Needs review" value={stats.pendingReview} note="Before approval or scheduling" tone="amber" />
-                <Metric label="Contacts" value={stats.contacts} note={`${stats.companies} companies`} tone="blue" />
+                <Metric label="All database contacts" value={stats.contacts} note={`${stats.companies} companies across every campaign`} tone="blue" />
                 <Metric label="Successful sends" value={stats.sent} note={`${stats.failed} failed attempts recorded`} tone="green" />
               </section>
 
@@ -997,7 +997,7 @@ Please let me know a suitable time to connect.`,
                 <article className="panel delivery-panel">
                   <div className="panel-heading"><div><p className="eyebrow">Delivery readiness</p><h2>Campaign funnel</h2></div></div>
                   <div className="funnel-list">
-                    <div><span>Imported contacts</span><strong>{stats.contacts}</strong><i style={{ width: "100%" }} /></div>
+                    <div><span>All database contacts</span><strong>{stats.contacts}</strong><i style={{ width: "100%" }} /></div>
                     <div><span>Generated emails</span><strong>{stats.emails}</strong><i style={{ width: `${Math.min(100, Math.round(stats.emails / Math.max(1, stats.contacts) * 100))}%` }} /></div>
                     <div><span>Approved</span><strong>{stats.approved}</strong><i style={{ width: `${Math.max(1, Math.round(stats.approved / Math.max(1, stats.emails) * 100))}%` }} /></div>
                     <div><span>Scheduled</span><strong>{stats.scheduled}</strong><i style={{ width: `${Math.max(1, Math.round(stats.scheduled / Math.max(1, stats.emails) * 100))}%` }} /></div>
@@ -1064,10 +1064,10 @@ Please let me know a suitable time to connect.`,
                             <i aria-label={`${progress}% complete`}><b style={{ width: `${progress}%` }} /></i>
                           </div>
                           <div className="background-job-metrics" aria-label="Live generation counts">
-                            <span><b>{job.draftsCreated.toLocaleString("en-IN")}</b><small>Emails generated</small></span>
-                            <span><b>{job.contactsFound.toLocaleString("en-IN")}</b><small>Contacts found</small></span>
-                            <span><b>{remaining.toLocaleString("en-IN")}</b><small>Remaining</small></span>
-                            <span className={job.failedItems ? "has-failures" : ""}><b>{job.failedItems.toLocaleString("en-IN")}</b><small>Couldn&apos;t process</small></span>
+                            <span><b>{job.draftsCreated.toLocaleString("en-IN")}</b><small>Unique emails created</small></span>
+                            <span><b>{Math.max(0, job.successfulItems - job.draftsCreated).toLocaleString("en-IN")}</b><small>Duplicates / existing skipped</small></span>
+                            <span><b>{remaining.toLocaleString("en-IN")}</b><small>Source records remaining</small></span>
+                            <span className={job.failedItems ? "has-failures" : ""}><b>{job.failedItems.toLocaleString("en-IN")}</b><small>Source records failed</small></span>
                           </div>
                         </article>
                       );
