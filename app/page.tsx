@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import data from "./dashboard-data.json";
+import StatisticsDashboard from "./statistics-dashboard";
 
-type Section = "overview" | "create" | "campaigns" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
+type Section = "overview" | "create" | "campaigns" | "statistics" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type CampaignWorkspaceView = "overview" | "emails" | "delivery";
 type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
 type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null };
@@ -38,6 +39,7 @@ const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
   { id: "create", label: "Create outreach", icon: "+" },
   { id: "campaigns", label: "Campaigns", icon: "▦" },
+  { id: "statistics", label: "Statistics", icon: "↗" },
   { id: "contacts", label: "Contacts", icon: "◎" },
   { id: "companies", label: "Companies", icon: "◇" },
   { id: "settings", label: "Controls & APIs", icon: "⚙" },
@@ -1166,6 +1168,10 @@ Please let me know a suitable time to connect.`,
               <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
               <div className="pagination"><span>Page {page} of {pages}</span><div><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div></div>
             </section>
+          )}
+
+          {section === "statistics" && (
+            <StatisticsDashboard emails={displayEmails} />
           )}
 
           {section === "create" && (

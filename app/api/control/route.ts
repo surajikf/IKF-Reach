@@ -1932,7 +1932,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
       subject: mail.subject,
       htmlContent,
       ...(scheduledAt ? { scheduledAt } : {}),
-      tags: ["ikf-outreach"],
+      tags: ["ikf-outreach", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();
@@ -1954,7 +1954,7 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
       htmlContent: `${previewBanner}${htmlContent}`,
-      tags: ["ikf-outreach", "test-preview"],
+      tags: ["ikf-outreach", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();

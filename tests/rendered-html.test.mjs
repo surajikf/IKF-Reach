@@ -5,6 +5,9 @@ import test from "node:test";
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const api = await readFile(new URL("../app/api/control/route.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
+const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", import.meta.url), "utf8");
+const webhookApi = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
 
 test("campaign creation exposes durable background research and verified sender selection", () => {
   assert.match(page, /Save as draft campaign/);
@@ -62,4 +65,32 @@ test("campaign audience permits safe deletion of unsent generated emails only", 
   assert.match(api, /delete_generated_email/);
   assert.match(api, /Sent or scheduled emails cannot be deleted/);
   assert.match(api, /generated_email_deleted/);
+});
+
+test("statistics uses real Brevo events with campaign, recipient, sender, event, and date filters", () => {
+  assert.match(page, /StatisticsDashboard/);
+  assert.match(statistics, /Campaign Statistics/);
+  assert.match(statistics, /All campaigns/);
+  assert.match(statistics, /Email or subject/);
+  assert.match(statistics, /Last 90 days/);
+  assert.match(statistics, /Recipient activity/);
+  assert.match(statistics, /Domain analytics/);
+  assert.match(statisticsApi, /smtp\/statistics\/events/);
+  assert.match(statisticsApi, /maximum of 90 days/);
+});
+
+test("statistics formulas and exports distinguish unique and total engagement", () => {
+  assert.match(statistics, /Unique opens/);
+  assert.match(statistics, /totalOpens/);
+  assert.match(statistics, /Unique clicks/);
+  assert.match(statistics, /clickRate/);
+  assert.match(statistics, /ctor/);
+  assert.match(statistics, /Export CSV/);
+  assert.match(statistics, /Save PDF/);
+});
+
+test("Brevo webhook events are authenticated, deduplicated, and stored durably", () => {
+  assert.match(webhookApi, /BREVO_WEBHOOK_TOKEN/);
+  assert.match(webhookApi, /INSERT OR IGNORE INTO email_analytics_events/);
+  assert.match(webhookApi, /providerEventKey|provider_event_key/);
 });
