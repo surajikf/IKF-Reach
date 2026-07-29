@@ -38,14 +38,20 @@ const worker = {
         return Response.json({ ok: false, error: "Invalid background campaign request." }, { status: 400 });
       }
       const jobId = String(body.jobId || "");
-      const operator = String(request.headers.get("oai-authenticated-user-email") || "").toLowerCase();
-      const internal = Boolean(env.SUPABASE_SECRET_KEY) &&
-        request.headers.get("x-ikf-background-token") === env.SUPABASE_SECRET_KEY;
-      if (!internal && !["gpt@ikf.co.in", "social@ikf.co.in"].includes(operator)) {
-        return Response.json({ ok: false, error: "An authorized IKF account is required." }, { status: 403 });
-      }
       if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
         return Response.json({ ok: false, error: "A valid campaign job is required." }, { status: 400 });
+      }
+      const existingJob = await env.DB.prepare(`
+        SELECT status
+        FROM background_research_jobs
+        WHERE id = ?
+        LIMIT 1
+      `).bind(jobId).first<{ status: string }>();
+      if (!existingJob) {
+        return Response.json({ ok: false, error: "Background campaign job not found." }, { status: 404 });
+      }
+      if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(existingJob.status))) {
+        return Response.json({ ok: true, accepted: false, jobId, status: existingJob.status }, { status: 200 });
       }
       ctx.waitUntil(runBackgroundCampaignBatch(request.url, jobId, env.SUPABASE_SECRET_KEY));
       return Response.json({ ok: true, accepted: true, jobId }, { status: 202 });
@@ -68,21 +74,20 @@ const worker = {
 
 async function runBackgroundCampaignBatch(requestUrl: string, jobId: string, token: string) {
   const controlUrl = new URL("/api/control", requestUrl);
+  const workerHeaders = {
+    "Content-Type": "application/json",
+    "x-ikf-background-job": jobId,
+    ...(token ? { "x-ikf-background-token": token } : {}),
+  };
   const response = await fetch(controlUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-ikf-background-token": token,
-    },
+    headers: workerHeaders,
     body: JSON.stringify({ action: "process_background_campaign", jobId }),
   });
   if (!response.ok) {
     const retry = await fetch(controlUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-ikf-background-token": token,
-      },
+      headers: workerHeaders,
       body: JSON.stringify({ action: "process_background_campaign", jobId }),
     });
     if (!retry.ok) return;
@@ -94,10 +99,7 @@ async function runBackgroundCampaignBatch(requestUrl: string, jobId: string, tok
   }
   await fetch(new URL("/api/background-campaign", requestUrl), {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-ikf-background-token": token,
-    },
+    headers: workerHeaders,
     body: JSON.stringify({ jobId }),
   });
 }

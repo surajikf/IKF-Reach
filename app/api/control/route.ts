@@ -284,8 +284,8 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const internalWorker = body.action === "process_background_campaign" &&
-      Boolean(process.env.SUPABASE_SECRET_KEY) &&
-      req.headers.get("x-ikf-background-token") === process.env.SUPABASE_SECRET_KEY;
+      /^[0-9a-f-]{36}$/i.test(String(body.jobId || "")) &&
+      req.headers.get("x-ikf-background-job") === String(body.jobId);
     if (!canManage(req) && !internalWorker) {
       return NextResponse.json(
         { ok: false, error: "Sign in with an authorized IKF account to manage or send emails." },

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import data from "./dashboard-data.json";
 import StatisticsDashboard from "./statistics-dashboard";
 import { inferContactName } from "./lib/name";
@@ -13,7 +13,7 @@ type CompanyRecord = { id: string; name: string; website?: string | null; indust
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
 type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
-type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; updatedAt: string };
+type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
 type ControlData = {
   ok: boolean;
   canManage?: boolean;
@@ -250,6 +250,7 @@ Please let me know a suitable time to connect.`,
   const [contactPageSize, setContactPageSize] = useState(50);
   const [contactIndustry, setContactIndustry] = useState("all");
   const [companyIndustry, setCompanyIndustry] = useState("all");
+  const backgroundKickoffsRef = useRef(new Map<string, number>());
   const pageSize = 20;
   const companyPageSize = 18;
 
@@ -282,8 +283,25 @@ Please let me know a suitable time to connect.`,
   useEffect(() => {
     const active = (control?.jobs || []).some((job) => ["queued", "researching"].includes(String(job.status)));
     if (!active) return;
-    const timer = window.setInterval(loadControl, 5000);
+    const timer = window.setInterval(loadControl, 3000);
     return () => window.clearInterval(timer);
+  }, [control?.jobs]);
+
+  useEffect(() => {
+    const now = Date.now();
+    for (const job of (control?.jobs || []) as BackgroundJob[]) {
+      if (!["queued", "researching"].includes(String(job.status))) continue;
+      const lastKickoff = backgroundKickoffsRef.current.get(job.id) || 0;
+      const updatedAt = new Date(job.updatedAt || job.createdAt).getTime();
+      const stalled = Number.isFinite(updatedAt) && now - updatedAt > 120_000;
+      if (now - lastKickoff < 120_000 || (job.status !== "queued" && !stalled)) continue;
+      backgroundKickoffsRef.current.set(job.id, now);
+      void fetch("/api/background-campaign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id }),
+      });
+    }
   }, [control?.jobs]);
 
   useEffect(() => {
@@ -1008,11 +1026,51 @@ Please let me know a suitable time to connect.`,
 
               {!campaignDetailOpen && activeBackgroundJobs.length > 0 && (
                 <section className="panel background-campaign-jobs" aria-live="polite">
-                  <div className="panel-heading"><div><p className="eyebrow">Background research</p><h2>{activeBackgroundJobs.length} campaign{activeBackgroundJobs.length === 1 ? "" : "s"} processing</h2><p className="section-helper">Website crawling and draft generation continue on the server when this dashboard is closed.</p></div><span>Auto-refreshing</span></div>
+                  <div className="background-jobs-heading">
+                    <div>
+                      <p className="eyebrow">Live campaign generation</p>
+                      <h2>{activeBackgroundJobs.length} campaign{activeBackgroundJobs.length === 1 ? "" : "s"} processing</h2>
+                    </div>
+                    <span><b /> Live · refreshes every 3 seconds</span>
+                  </div>
                   <div className="background-job-list">
                     {activeBackgroundJobs.map((job) => {
                       const progress = job.totalItems ? Math.round((job.completedItems / job.totalItems) * 100) : 0;
-                      return <article key={job.id}><span className="campaign-symbol">{job.campaignName.slice(0, 2).toUpperCase()}</span><div><strong>{job.campaignName}</strong><small>{job.completedItems} of {job.totalItems} sources processed · {job.contactsFound} contacts found · {job.draftsCreated} drafts created</small><i><b style={{ width: `${progress}%` }} /></i></div><div className="background-job-actions"><StatusPill value={job.status} /><button type="button" disabled={working || !control?.canManage} onClick={() => stopBackgroundJob(job)}>Stop processing</button></div></article>;
+                      const remaining = Math.max(0, job.totalItems - job.completedItems);
+                      const startedAt = job.startedAt ? new Date(job.startedAt).getTime() : 0;
+                      const elapsedMinutes = startedAt ? Math.max((Date.now() - startedAt) / 60_000, 0.1) : 0;
+                      const rate = elapsedMinutes && job.completedItems ? job.completedItems / elapsedMinutes : 0;
+                      const etaMinutes = rate ? Math.ceil(remaining / rate) : 0;
+                      const activity = job.status === "queued"
+                        ? "Starting secure background worker…"
+                        : etaMinutes
+                          ? `About ${etaMinutes < 60 ? `${etaMinutes} min` : `${Math.ceil(etaMinutes / 60)} hr`} remaining`
+                          : "Generating personalized emails…";
+                      return (
+                        <article key={job.id}>
+                          <div className="background-job-title">
+                            <span className="campaign-symbol">{job.campaignName.slice(0, 2).toUpperCase()}</span>
+                            <div>
+                              <strong>{job.campaignName}</strong>
+                              <small>{activity}</small>
+                            </div>
+                            <div className="background-job-actions">
+                              <StatusPill value={job.status} />
+                              <button type="button" aria-label="Stop processing" disabled={working || !control?.canManage} onClick={() => stopBackgroundJob(job)}>Stop</button>
+                            </div>
+                          </div>
+                          <div className="background-job-progress">
+                            <div><strong>{progress}%</strong><span>{job.completedItems.toLocaleString("en-IN")} of {job.totalItems.toLocaleString("en-IN")} processed</span></div>
+                            <i aria-label={`${progress}% complete`}><b style={{ width: `${progress}%` }} /></i>
+                          </div>
+                          <div className="background-job-metrics" aria-label="Live generation counts">
+                            <span><b>{job.draftsCreated.toLocaleString("en-IN")}</b><small>Emails generated</small></span>
+                            <span><b>{job.contactsFound.toLocaleString("en-IN")}</b><small>Contacts found</small></span>
+                            <span><b>{remaining.toLocaleString("en-IN")}</b><small>Remaining</small></span>
+                            <span className={job.failedItems ? "has-failures" : ""}><b>{job.failedItems.toLocaleString("en-IN")}</b><small>Couldn&apos;t process</small></span>
+                          </div>
+                        </article>
+                      );
                     })}
                   </div>
                 </section>
