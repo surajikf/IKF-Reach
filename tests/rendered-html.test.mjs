@@ -71,6 +71,9 @@ test("statistics uses real Brevo events with campaign, recipient, sender, event,
   assert.match(page, /StatisticsDashboard/);
   assert.match(statistics, /Campaign Statistics/);
   assert.match(statistics, /All campaigns/);
+  assert.match(statistics, /All campaign types/);
+  assert.match(statistics, /All statuses/);
+  assert.match(statistics, /All tags/);
   assert.match(statistics, /Email or subject/);
   assert.match(statistics, /Last 90 days/);
   assert.match(statistics, /Recipient activity/);
@@ -86,6 +89,7 @@ test("statistics formulas and exports distinguish unique and total engagement", 
   assert.match(statistics, /clickRate/);
   assert.match(statistics, /ctor/);
   assert.match(statistics, /Export CSV/);
+  assert.match(statistics, /Export Excel/);
   assert.match(statistics, /Save PDF/);
 });
 

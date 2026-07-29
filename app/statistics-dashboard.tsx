@@ -117,6 +117,9 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
   const [customEnd, setCustomEnd] = useState(dateInput(new Date()));
   const [campaignId, setCampaignId] = useState("all");
   const [sender, setSender] = useState("all");
+  const [campaignStatus, setCampaignStatus] = useState("all");
+  const [campaignType, setCampaignType] = useState("all");
+  const [tag, setTag] = useState("all");
   const [eventFilter, setEventFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<ReportTab>("overview");
@@ -143,17 +146,23 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
 
   const range = useMemo(() => presetRange(preset, customStart, customEnd), [preset, customStart, customEnd]);
   const senders = useMemo(() => [...new Set((data?.events || []).map((event) => event.sender).filter(Boolean))].sort(), [data]);
+  const statuses = useMemo(() => [...new Set((data?.campaigns || []).map((campaign) => campaign.status).filter(Boolean))].sort(), [data]);
+  const tags = useMemo(() => [...new Set((data?.events || []).map((event) => event.tag).filter(Boolean))].sort(), [data]);
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
+    const campaignStatuses = new Map((data?.campaigns || []).map((campaign) => [campaign.id, campaign.status]));
     return (data?.events || []).filter((event) => {
       const time = new Date(event.date).getTime();
       return time >= range.start.getTime() && time <= range.end.getTime()
         && (campaignId === "all" || event.campaignId === campaignId)
         && (sender === "all" || event.sender === sender)
+        && (campaignStatus === "all" || campaignStatuses.get(event.campaignId || "") === campaignStatus)
+        && (campaignType === "all" || campaignType === "transactional")
+        && (tag === "all" || event.tag === tag)
         && (eventFilter === "all" || event.event === eventFilter)
         && (!term || `${event.recipient} ${event.subject} ${event.campaignName}`.toLowerCase().includes(term));
     });
-  }, [data, range, campaignId, sender, eventFilter, search]);
+  }, [data, range, campaignId, sender, campaignStatus, campaignType, tag, eventFilter, search]);
 
   const metrics = useMemo(() => {
     const byType = (types: Set<string> | string[]) => filtered.filter((event) => types instanceof Set ? types.has(event.event) : types.includes(event.event));
@@ -300,13 +309,27 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     URL.revokeObjectURL(url);
   }
 
+  function exportExcel() {
+    const rows = [
+      ["Date", "Event", "Campaign", "Recipient", "Sender", "Subject", "Tag", "Link", "Reason", "Message ID"],
+      ...filtered.map((event) => [event.date, eventNames[event.event] || event.event, event.campaignName, event.recipient, event.sender, event.subject, event.tag, event.link, event.reason, event.messageId]),
+    ];
+    const tsv = rows.map((row) => row.map((cell) => String(cell || "").replaceAll("\t", " ").replaceAll("\r", " ").replaceAll("\n", " ")).join("\t")).join("\r\n");
+    const url = URL.createObjectURL(new Blob(["\uFEFF", tsv], { type: "application/vnd.ms-excel;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `ikf-outreach-statistics-${dateInput(range.start)}-${dateInput(range.end)}.xls`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   if (loading && !data) return <section className="panel statistics-loading"><span className="statistics-spinner" /><h2>Loading Brevo statistics</h2><p>Matching delivery events to IKF campaigns and recipients…</p></section>;
 
   return (
     <div className="statistics-module">
       <section className="statistics-hero">
         <div><p className="eyebrow">Brevo campaign intelligence</p><h2>Campaign Statistics</h2><p>Delivery, engagement, recipient, domain, and event-level reporting for every IKF outreach campaign.</p></div>
-        <div className="statistics-hero-actions"><button onClick={loadStatistics} disabled={loading}>{loading ? "Refreshing…" : "Refresh Brevo data"}</button><button onClick={exportCsv} disabled={!filtered.length}>Export CSV</button><button onClick={() => window.print()}>Save PDF</button></div>
+        <div className="statistics-hero-actions"><button onClick={loadStatistics} disabled={loading}>{loading ? "Refreshing…" : "Refresh Brevo data"}</button><button onClick={exportCsv} disabled={!filtered.length}>Export CSV</button><button onClick={exportExcel} disabled={!filtered.length}>Export Excel</button><button onClick={() => window.print()}>Save PDF</button></div>
       </section>
 
       {error && <div className="statistics-alert error"><strong>Statistics unavailable</strong><span>{error}</span></div>}
@@ -317,6 +340,9 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
         {preset === "custom" && <><label><span>From</span><input type="date" value={customStart} max={customEnd} onChange={(event) => setCustomStart(event.target.value)} /></label><label><span>To</span><input type="date" value={customEnd} min={customStart} max={dateInput(new Date())} onChange={(event) => setCustomEnd(event.target.value)} /></label></>}
         <label><span>Campaign</span><select value={campaignId} onChange={(event) => setCampaignId(event.target.value)}><option value="all">All campaigns</option>{(data?.campaigns || []).map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}</select></label>
         <label><span>Sender</span><select value={sender} onChange={(event) => setSender(event.target.value)}><option value="all">All senders</option>{senders.map((email) => <option key={email} value={email}>{email}</option>)}</select></label>
+        <label><span>Campaign type</span><select value={campaignType} onChange={(event) => setCampaignType(event.target.value)}><option value="all">All campaign types</option><option value="transactional">Transactional outreach</option></select></label>
+        <label><span>Status</span><select value={campaignStatus} onChange={(event) => setCampaignStatus(event.target.value)}><option value="all">All statuses</option>{statuses.map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label>
+        <label><span>Tag</span><select value={tag} onChange={(event) => setTag(event.target.value)}><option value="all">All tags</option>{tags.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
         <label><span>Event</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}><option value="all">All events</option>{Object.entries(eventNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label className="statistics-search"><span>Email or subject</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search recipient, subject, or campaign" /></label>
       </section>
