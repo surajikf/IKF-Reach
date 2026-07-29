@@ -26,9 +26,12 @@ function normalizeEvent(value: unknown) {
 }
 
 function eventDate(event: BrevoWebhookEvent) {
-  const supplied = event.date || event.ts_event || event.ts || event.timestamp;
-  if (typeof supplied === "number") return new Date(supplied * 1000).toISOString();
-  const parsed = new Date(String(supplied || ""));
+  const timestamp = event.ts_event || event.ts || event.timestamp;
+  const numericTimestamp = Number(timestamp);
+  if (timestamp !== undefined && Number.isFinite(numericTimestamp)) {
+    return new Date(numericTimestamp > 1_000_000_000_000 ? numericTimestamp : numericTimestamp * 1000).toISOString();
+  }
+  const parsed = new Date(String(event.date || ""));
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
 }
 

@@ -66,7 +66,7 @@ function canonicalEventKey(event: AnalyticsEvent) {
 function addEvent(events: Map<string, AnalyticsEvent>, event: AnalyticsEvent) {
   const key = canonicalEventKey(event);
   const existing = events.get(key);
-  const priority = { database: 0, brevo: 1, webhook: 2 };
+  const priority = { database: 0, webhook: 1, brevo: 2 };
   event.key = key;
   if (!existing || priority[event.source] > priority[existing.source]) events.set(key, event);
 }

@@ -99,8 +99,10 @@ test("Brevo webhook events are authenticated, deduplicated, and stored durably",
   assert.match(webhookApi, /BREVO_WEBHOOK_TOKEN/);
   assert.match(webhookApi, /Bearer /);
   assert.match(webhookApi, /x-brevo-webhook-token/);
+  assert.match(webhookApi, /event\.ts_event \|\| event\.ts \|\| event\.timestamp/);
   assert.match(webhookApi, /INSERT OR IGNORE INTO email_analytics_events/);
   assert.match(webhookApi, /providerEventKey|provider_event_key/);
   assert.match(statisticsApi, /canonicalEventKey/);
+  assert.match(statisticsApi, /database: 0, webhook: 1, brevo: 2/);
   assert.match(statisticsApi, /if \(!send\) continue/);
 });
