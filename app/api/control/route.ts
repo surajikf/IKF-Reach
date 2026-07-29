@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb } from "../../../db";
 import { buildCampaignSchedule, insideIndiaWindow } from "../../lib/schedule";
+import { inferContactName } from "../../lib/name";
 
 export const dynamic = "force-dynamic";
 
@@ -65,13 +66,8 @@ async function campaignReplyTo(campaignId?: string | null) {
   return normalizedReplyTo(rows[0]?.value?.email, replyTo());
 }
 
-const generic = new Set(["admin", "contact", "info", "sales", "office", "support", "team", "hello", "marketing", "secretary", "president", "communications"]);
 function greetingName(email: string, supplied?: string) {
-  if (supplied?.trim()) return supplied.trim();
-  const parts = email.split("@")[0].toLowerCase().split(/[._-]+/).filter(Boolean);
-  return parts.length >= 2 && parts.length <= 4 && parts.every((part) => /^[a-z]{2,20}$/.test(part) && !generic.has(part))
-    ? parts.map((part) => part[0].toUpperCase() + part.slice(1)).join(" ")
-    : "Sir/Madam";
+  return inferContactName(email, supplied);
 }
 
 type WebsiteResearch = {
@@ -131,8 +127,8 @@ export async function GET(req: NextRequest) {
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
       listBackgroundJobs(),
       db("outreach_settings?select=key,value"),
-      db("campaigns?select=id,name,status,sender_name,sender_email&order=created_at.desc"),
-      db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&order=generated_at.desc&limit=1000"),
+      db("campaigns?select=id,name,status,sender_name,sender_email&status=neq.deleted&order=created_at.desc"),
+      db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&status=neq.campaign_deleted&order=generated_at.desc&limit=1000"),
       db("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc&limit=1000"),
       db("companies?select=id,name,website,normalized_domain,industry,country,research_data,updated_at&order=updated_at.desc&limit=1000"),
       db("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc&limit=1000"),
@@ -151,11 +147,14 @@ export async function GET(req: NextRequest) {
     const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
     const companyById = new Map(companies.map((item: Record<string, any>) => [item.id, item]));
     const campaignById = new Map(campaignsWithReplyTo.map((item: Record<string, any>) => [item.id, item]));
+    const activeCampaignIds = new Set(campaignsWithReplyTo.map((item: Record<string, any>) => String(item.id)));
+    const visibleEmails = emails.filter((item: Record<string, any>) => activeCampaignIds.has(String(item.campaign_id)));
+    const visibleEmailIds = new Set(visibleEmails.map((item: Record<string, any>) => String(item.id)));
     const latestSendByEmailId = new Map<string, Record<string, any>>();
     for (const item of sends) {
       if (item.generated_email_id && !latestSendByEmailId.has(item.generated_email_id)) latestSendByEmailId.set(item.generated_email_id, item);
     }
-    const liveEmails = emails.map((item: Record<string, any>) => {
+    const liveEmails = visibleEmails.map((item: Record<string, any>) => {
       const contact = contactById.get(item.contact_id) || {};
       const company = companyById.get(item.company_id) || {};
       const campaign = campaignById.get(item.campaign_id) || {};
@@ -179,7 +178,7 @@ export async function GET(req: NextRequest) {
     for (const contact of contacts) {
       if (contact.company_id) contactCountByCompany.set(contact.company_id, (contactCountByCompany.get(contact.company_id) || 0) + 1);
     }
-    for (const email of emails) {
+    for (const email of visibleEmails) {
       if (email.company_id) draftCountByCompany.set(email.company_id, (draftCountByCompany.get(email.company_id) || 0) + 1);
     }
     const liveContacts = contacts.map((item: Record<string, any>) => {
@@ -201,7 +200,7 @@ export async function GET(req: NextRequest) {
     const liveCompanies = companies.map((item: Record<string, any>) => ({
       id: item.id,
       name: item.name,
-      website: item.website || (item.normalized_domain ? `https://${item.normalized_domain}` : ""),
+      website: item.website || (item.normalized_domain && !String(item.normalized_domain).startsWith("company:") ? `https://${item.normalized_domain}` : ""),
       industry: item.industry || null,
       country: item.country || null,
       contacts: contactCountByCompany.get(item.id) || 0,
@@ -222,12 +221,12 @@ export async function GET(req: NextRequest) {
     const liveStats = {
       companies: companies.length,
       contacts: contacts.length,
-      emails: emails.length,
-      pendingReview: emails.filter((item: Record<string, any>) => item.status === "draft_pending_review").length,
-      approved: emails.filter((item: Record<string, any>) => item.status === "approved").length,
-      scheduled: emails.filter((item: Record<string, any>) => item.status === "scheduled").length,
-      sent: sends.filter((item: Record<string, any>) => item.status === "sent").length,
-      failed: sends.filter((item: Record<string, any>) => /fail|not_sent/i.test(String(item.status || ""))).length,
+      emails: visibleEmails.length,
+      pendingReview: visibleEmails.filter((item: Record<string, any>) => item.status === "draft_pending_review").length,
+      approved: visibleEmails.filter((item: Record<string, any>) => item.status === "approved").length,
+      scheduled: visibleEmails.filter((item: Record<string, any>) => item.status === "scheduled").length,
+      sent: sends.filter((item: Record<string, any>) => visibleEmailIds.has(String(item.generated_email_id)) && item.status === "sent").length,
+      failed: sends.filter((item: Record<string, any>) => visibleEmailIds.has(String(item.generated_email_id)) && /fail|not_sent/i.test(String(item.status || ""))).length,
     };
     let brevo = false;
     let availableSenders: Array<{ name: string; email: string; active: boolean }> = [];
@@ -312,6 +311,7 @@ export async function POST(req: NextRequest) {
         topic,
         emailTemplate,
         brief: String(body.brief || ""),
+        industry: cleanText(body.industry, 180),
         user,
         websites: suppliedWebsites,
         contacts: parsedContacts,
@@ -396,6 +396,7 @@ export async function POST(req: NextRequest) {
         name: body.name,
         company: body.company,
         website: body.website,
+        industry: body.industry,
         brief: body.brief,
         topic: body.topic,
         campaignName: body.campaignName,
@@ -474,6 +475,7 @@ export async function POST(req: NextRequest) {
             campaignName,
             emailTemplate,
             brief: String(body.brief || ""),
+            industry: cleanText(body.industry, 180),
             source: body.document?.name ? `document:${body.document.name}` : "pasted_list",
           }, user);
           results.push({ ok: true, email: input.email, company: result.company.name, name: greetingName(input.email, input.name), discoveredEmails: result.research?.discoveredEmails || [], researchSummary: result.research?.summary || "", draftId: result.draft.id });
@@ -543,6 +545,56 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, contact: updatedContacts[0], company: updatedCompany });
     }
 
+    if (body.action === "update_company") {
+      const companyId = String(body.companyId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(companyId)) return NextResponse.json({ ok: false, error: "Choose a valid company to edit." }, { status: 400 });
+      const companyName = cleanText(body.name, 180);
+      if (!companyName) return NextResponse.json({ ok: false, error: "Add the company or organization name." }, { status: 400 });
+      const existingRows = await db(`companies?select=*&id=eq.${encodeURIComponent(companyId)}&limit=1`);
+      const existingCompany = existingRows[0];
+      if (!existingCompany) return NextResponse.json({ ok: false, error: "Company not found." }, { status: 404 });
+      const websiteInput = String(body.website || "").trim();
+      let website: string | null = null;
+      let normalizedDomain = String(existingCompany.normalized_domain || "");
+      try {
+        website = websiteInput ? safeWebsiteUrl(websiteInput) : null;
+        if (website) normalizedDomain = new URL(website).hostname.replace(/^www\./, "").toLowerCase();
+      } catch {
+        return NextResponse.json({ ok: false, error: "Enter a valid public company website." }, { status: 400 });
+      }
+      if (normalizedDomain && normalizedDomain !== existingCompany.normalized_domain) {
+        const duplicates = await db(`companies?select=id,name&normalized_domain=eq.${encodeURIComponent(normalizedDomain)}&limit=2`);
+        const duplicate = duplicates.find((company: Record<string, any>) => company.id !== companyId);
+        if (duplicate) {
+          return NextResponse.json({ ok: false, error: `That website is already assigned to ${duplicate.name}. Open that company instead of creating a duplicate.` }, { status: 409 });
+        }
+      }
+      const updated = await db(`companies?id=eq.${encodeURIComponent(companyId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: companyName,
+          normalized_name: companyName.toLowerCase(),
+          normalized_domain: normalizedDomain,
+          industry: cleanText(body.industry, 180) || null,
+          website,
+          country: cleanText(body.country, 100) || null,
+        }),
+      });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          company_id: companyId,
+          action: "company_updated",
+          details: {
+            company: companyName,
+            industry: cleanText(body.industry, 180) || null,
+            updated_by: user,
+          },
+        }),
+      });
+      return NextResponse.json({ ok: true, company: updated[0] || existingCompany });
+    }
+
     if (body.action === "approve") {
       const rows = await db(`generated_emails?id=eq.${body.emailId}`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
       return NextResponse.json({ ok: true, email: rows[0] });
@@ -580,6 +632,195 @@ export async function POST(req: NextRequest) {
         }),
       });
       return NextResponse.json({ ok: true, deletedId: emailId });
+    }
+
+    if (body.action === "abort_campaign_delivery") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) {
+        return NextResponse.json({ ok: false, error: "Choose a valid campaign to stop." }, { status: 400 });
+      }
+      const campaignRows = await db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`);
+      const campaign = campaignRows[0];
+      if (!campaign || campaign.status === "deleted") {
+        return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
+      }
+      const scheduledSends = await db(`email_sends?select=id,generated_email_id,brevo_message_id,status&campaign_id=eq.${encodeURIComponent(campaignId)}&status=like.scheduled%25&limit=5000`);
+      const cancellable = scheduledSends.filter((item: Record<string, any>) => item.brevo_message_id);
+      if (!cancellable.length) {
+        return NextResponse.json({ ok: false, error: "This campaign has no future scheduled emails to stop. Emails already submitted for immediate delivery cannot be recalled." }, { status: 409 });
+      }
+      const failures: string[] = [];
+      for (const group of chunk(cancellable.map((item: Record<string, any>) => String(item.brevo_message_id)), 8)) {
+        const outcomes = await Promise.all(group.map(async (messageId) => {
+          const response = await fetch(`https://api.brevo.com/v3/smtp/email/${encodeURIComponent(messageId)}`, {
+            method: "DELETE",
+            headers: { "api-key": process.env.BREVO_API_KEY || "" },
+          });
+          return response.ok || response.status === 404 ? null : messageId;
+        }));
+        failures.push(...outcomes.filter((value): value is string => Boolean(value)));
+      }
+      if (failures.length) {
+        return NextResponse.json({ ok: false, error: `Brevo could not cancel ${failures.length} scheduled email${failures.length === 1 ? "" : "s"}. No local status was changed; try again.` }, { status: 409 });
+      }
+      const sendIds = cancellable.map((item: Record<string, any>) => String(item.id));
+      const emailIds = [...new Set(cancellable.map((item: Record<string, any>) => String(item.generated_email_id)).filter(Boolean))];
+      for (const group of chunk(sendIds, 50)) {
+        await db(`email_sends?id=in.(${group.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "cancelled" }) });
+      }
+      await db(`outreach_queue?campaign_id=eq.${encodeURIComponent(campaignId)}&status=like.scheduled%25`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "cancelled" }),
+      });
+      for (const group of chunk(emailIds, 50)) {
+        await db(`generated_emails?id=in.(${group.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
+      }
+      await db(`campaigns?id=eq.${encodeURIComponent(campaignId)}`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "campaign_delivery_aborted",
+          details: {
+            campaign_id: campaignId,
+            campaign_name: campaign.name,
+            schedules_cancelled: cancellable.length,
+            stopped_by: user,
+          },
+        }),
+      });
+      return NextResponse.json({ ok: true, campaignId, schedulesCancelled: cancellable.length });
+    }
+
+    if (body.action === "delete_campaign") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) {
+        return NextResponse.json({ ok: false, error: "Choose a valid campaign to delete." }, { status: 400 });
+      }
+      const campaignRows = await db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`);
+      const campaign = campaignRows[0];
+      if (!campaign || campaign.status === "deleted") {
+        return NextResponse.json({ ok: false, error: "This campaign no longer exists." }, { status: 404 });
+      }
+      if (String(body.confirmName || "").trim() !== String(campaign.name || "").trim()) {
+        return NextResponse.json({ ok: false, error: "Type the complete campaign name exactly to confirm deletion." }, { status: 400 });
+      }
+
+      const [campaignEmails, campaignQueues, campaignSends] = await Promise.all([
+        db(`generated_emails?select=id,status&campaign_id=eq.${encodeURIComponent(campaignId)}&limit=5000`),
+        db(`outreach_queue?select=id,generated_email_id,status&campaign_id=eq.${encodeURIComponent(campaignId)}&limit=5000`),
+        db(`email_sends?select=id,generated_email_id,brevo_message_id,status&campaign_id=eq.${encodeURIComponent(campaignId)}&limit=5000`),
+      ]);
+      const scheduledSends = campaignSends.filter((item: Record<string, any>) =>
+        String(item.status || "").startsWith("scheduled") && item.brevo_message_id,
+      );
+      const messageIds = [...new Set(scheduledSends.map((item: Record<string, any>) => String(item.brevo_message_id)))];
+      const cancellationFailures: string[] = [];
+      for (const group of chunk(messageIds, 8)) {
+        const results = await Promise.all(group.map(async (messageId) => {
+          const response = await fetch(`https://api.brevo.com/v3/smtp/email/${encodeURIComponent(messageId)}`, {
+            method: "DELETE",
+            headers: { "api-key": process.env.BREVO_API_KEY || "" },
+          });
+          return response.ok || response.status === 404 ? null : messageId;
+        }));
+        cancellationFailures.push(...results.filter((value): value is string => Boolean(value)));
+      }
+      if (cancellationFailures.length) {
+        return NextResponse.json({
+          ok: false,
+          error: `Brevo could not cancel ${cancellationFailures.length} scheduled email${cancellationFailures.length === 1 ? "" : "s"}. The campaign was kept so no scheduled delivery is orphaned. Try again.`,
+        }, { status: 409 });
+      }
+
+      const now = new Date().toISOString();
+      const queueDb = getQueueDb();
+      await queueDb.batch([
+        queueDb.prepare(`
+          UPDATE background_research_jobs
+          SET status = 'cancelled',
+              last_error = 'Campaign deleted by an authorized operator.',
+              completed_at = COALESCE(completed_at, ?),
+              updated_at = ?
+          WHERE campaign_id = ? AND status IN ('queued', 'researching')
+        `).bind(now, now, campaignId),
+        queueDb.prepare(`
+          UPDATE background_research_items
+          SET status = 'cancelled',
+              claimed_by = NULL,
+              error = COALESCE(error, 'Campaign deleted by an authorized operator.'),
+              updated_at = ?
+          WHERE job_id IN (SELECT id FROM background_research_jobs WHERE campaign_id = ?)
+            AND status IN ('queued', 'researching')
+        `).bind(now, campaignId),
+      ]);
+
+      if (campaignQueues.length) {
+        await db(`outreach_queue?campaign_id=eq.${encodeURIComponent(campaignId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "cancelled" }),
+        });
+      }
+      if (scheduledSends.length) {
+        const scheduledIds = scheduledSends.map((item: Record<string, any>) => String(item.id));
+        for (const group of chunk(scheduledIds, 50)) {
+          await db(`email_sends?id=in.(${group.join(",")})`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: "cancelled" }),
+          });
+        }
+      }
+
+      const sendHistoryEmailIds = new Set(
+        campaignSends.map((item: Record<string, any>) => String(item.generated_email_id || "")).filter(Boolean),
+      );
+      const archivedEmailIds = campaignEmails
+        .map((item: Record<string, any>) => String(item.id))
+        .filter((id: string) => sendHistoryEmailIds.has(id));
+      const removableEmailIds = campaignEmails
+        .map((item: Record<string, any>) => String(item.id))
+        .filter((id: string) => !sendHistoryEmailIds.has(id));
+
+      for (const group of chunk(archivedEmailIds, 50)) {
+        await db(`generated_emails?id=in.(${group.join(",")})`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "campaign_deleted" }),
+        });
+      }
+      if (removableEmailIds.length) {
+        await db(`outreach_queue?campaign_id=eq.${encodeURIComponent(campaignId)}`, { method: "DELETE" });
+        for (const group of chunk(removableEmailIds, 50)) {
+          await db(`generated_emails?id=in.(${group.join(",")})`, { method: "DELETE" });
+        }
+      }
+      await db(`outreach_settings?key=eq.${encodeURIComponent(campaignReplyToKey(campaignId))}`, { method: "DELETE" });
+      await db(`campaigns?id=eq.${encodeURIComponent(campaignId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "deleted" }),
+      });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "campaign_deleted",
+          details: {
+            campaign_id: campaignId,
+            campaign_name: campaign.name,
+            generated_emails_removed: campaignEmails.length,
+            schedules_cancelled: scheduledSends.length,
+            sent_or_delivery_records_preserved: archivedEmailIds.length,
+            contacts_preserved: true,
+            companies_preserved: true,
+            deleted_by: user,
+          },
+        }),
+      });
+      return NextResponse.json({
+        ok: true,
+        campaignId,
+        campaignName: campaign.name,
+        emailsRemoved: campaignEmails.length,
+        schedulesCancelled: scheduledSends.length,
+        auditRecordsPreserved: archivedEmailIds.length,
+      });
     }
 
     if (body.action === "clean_unresolved_placeholders") {
@@ -1033,6 +1274,9 @@ async function listBackgroundJobs() {
         id,
         campaign_id AS campaignId,
         campaign_name AS campaignName,
+        topic,
+        email_template AS emailTemplate,
+        brief,
         status,
         total_items AS totalItems,
         completed_items AS completedItems,
@@ -1080,6 +1324,11 @@ async function selectVerifiedSender(value: unknown) {
 
 async function ensureCampaign(campaignName: string, status = "paused_user_hold", campaignSender?: { name: string; email: string }) {
   let campaigns = await db(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
+  if (campaigns[0]?.status === "deleted") {
+    throw new Error(
+      "A deleted campaign already used this name. Choose a new campaign name so its historical statistics stay separate.",
+    );
+  }
   if (!campaigns.length) {
     campaigns = await db("campaigns", {
       method: "POST",
@@ -1114,6 +1363,7 @@ async function queueBackgroundCampaign(input: {
   topic: string;
   emailTemplate: string;
   brief: string;
+  industry?: string;
   user: string;
   websites: string[];
   contacts: Array<Record<string, any>>;
@@ -1126,13 +1376,13 @@ async function queueBackgroundCampaign(input: {
       id: crypto.randomUUID(),
       type: "website",
       value: website,
-      payload: JSON.stringify({ website }),
+      payload: JSON.stringify({ website, industry: input.industry || "" }),
     })),
     ...input.contacts.map((contact) => ({
       id: crypto.randomUUID(),
       type: "contact",
       value: String(contact.email || "").toLowerCase(),
-      payload: JSON.stringify(contact),
+      payload: JSON.stringify({ ...contact, industry: input.industry || "" }),
     })),
   ];
   await queueDb.batch([
@@ -1325,6 +1575,7 @@ async function processBackgroundResearchItem(item: Record<string, any>, job: Rec
     campaignName: job.campaign_name,
     emailTemplate: job.email_template,
     brief: job.brief || "",
+    industry: cleanText(payload.industry, 180),
     source: `background_campaign:${job.id}`,
     skipExistingCampaignContact: true,
   };
@@ -1394,8 +1645,14 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   if (!companyName || (isPublicMailbox(emailDomain) && companyName === companyFromDomain(emailDomain) && !input.company && !research)) {
     throw new Error(`Add the company or website for ${email}; its public-mail domain does not identify an organization.`);
   }
-  const companyDomain = research?.website ? new URL(research.website).hostname.replace(/^www\./, "") : emailDomain;
+  const companyDomain = research?.website
+    ? new URL(research.website).hostname.replace(/^www\./, "")
+    : isPublicMailbox(emailDomain)
+      ? `company:${companyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`
+      : emailDomain;
   const website = research?.website || inferredWebsite || null;
+  const suppliedIndustry = cleanText(input.industry, 180);
+  const companyIndustry = suppliedIndustry || inferCompanyIndustry(research, String(input.brief || ""));
   const researchData = {
     brief: String(input.brief || ""),
     topic: String(input.topic || "AI Native Thinking Masterclass"),
@@ -1414,10 +1671,14 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
 
   let companies = await db(`companies?select=*&normalized_domain=eq.${encodeURIComponent(companyDomain)}&limit=1`);
   if (!companies.length) {
-    companies = await db("companies", { method: "POST", body: JSON.stringify({ name: companyName, normalized_name: companyName.toLowerCase(), normalized_domain: companyDomain, website, research_data: researchData }) });
+    companies = await db("companies", { method: "POST", body: JSON.stringify({ name: companyName, normalized_name: companyName.toLowerCase(), normalized_domain: companyDomain, website, industry: companyIndustry || null, research_data: researchData }) });
   } else {
     const existingResearch = companies[0].research_data && typeof companies[0].research_data === "object" ? companies[0].research_data : {};
-    const updated = await db(`companies?id=eq.${companies[0].id}`, { method: "PATCH", body: JSON.stringify({ website: website || companies[0].website, research_data: { ...existingResearch, ...researchData } }) });
+    const updated = await db(`companies?id=eq.${companies[0].id}`, { method: "PATCH", body: JSON.stringify({
+      website: website || companies[0].website,
+      industry: suppliedIndustry || companies[0].industry || companyIndustry || null,
+      research_data: { ...existingResearch, ...researchData },
+    }) });
     companies = updated.length ? updated : companies;
   }
   const company = companies[0];
@@ -1425,8 +1686,14 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   let contacts = await db(`contacts?select=*&normalized_email=eq.${encodeURIComponent(email)}&limit=1`);
   if (!contacts.length) {
     contacts = await db("contacts", { method: "POST", body: JSON.stringify({ company_id: company.id, full_name: input.name || null, email, normalized_email: email, data_confidence: input.name ? "user_provided" : "domain_researched", source: input.source || "intelligence_studio" }) });
-  } else if (input.name && !contacts[0].full_name) {
-    const updated = await db(`contacts?id=eq.${contacts[0].id}`, { method: "PATCH", body: JSON.stringify({ full_name: input.name, data_confidence: "user_provided" }) });
+  } else if ((input.name && !contacts[0].full_name) || (input.company && contacts[0].company_id !== company.id)) {
+    const updated = await db(`contacts?id=eq.${contacts[0].id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...(input.name && !contacts[0].full_name ? { full_name: input.name, data_confidence: "user_provided" } : {}),
+        ...(input.company && contacts[0].company_id !== company.id ? { company_id: company.id } : {}),
+      }),
+    });
     contacts = updated.length ? updated : contacts;
   }
   const contact = contacts[0];
@@ -1743,6 +2010,31 @@ function detectFocusAreas(text: string) {
   return matches.length ? matches.slice(0, 4) : ["operations", "knowledge workflows", "stakeholder engagement"];
 }
 
+function inferCompanyIndustry(research: WebsiteResearch | null, brief: string) {
+  const text = `${research?.title || ""} ${research?.description || ""} ${research?.summary || ""} ${(research?.focusAreas || []).join(" ")} ${brief}`.toLowerCase();
+  const categories: Array<[RegExp, string]> = [
+    [/\b(manufactur|factory|industrial|engineering|fabrication|machinery|chemical|steel|textile)\w*/i, "Manufacturing"],
+    [/\b(automotive|automobile|vehicle|mobility|auto parts?)\b/i, "Automotive & Mobility"],
+    [/\b(software|saas|information technology|it services|cloud|cybersecurity|web development)\b/i, "IT & Software"],
+    [/\b(artificial intelligence|machine learning|generative ai|automation technology)\b/i, "AI & Technology"],
+    [/\b(marketing|advertising|branding|media agency|digital agency)\b/i, "Marketing & Advertising"],
+    [/\b(bank|banking|finance|financial|insurance|investment|fintech)\b/i, "Financial Services"],
+    [/\b(health|hospital|medical|pharma|biotech|life science|diagnostic)\w*/i, "Healthcare & Life Sciences"],
+    [/\b(education|university|college|school|training|research institute)\b/i, "Education & Research"],
+    [/\b(retail|e-?commerce|consumer goods|store|shopping)\b/i, "Retail & E-commerce"],
+    [/\b(construction|real estate|property|infrastructure|architecture)\b/i, "Construction & Real Estate"],
+    [/\b(agri|agriculture|food|dairy|farming|spice|beverage)\w*/i, "Agriculture & Food"],
+    [/\b(energy|power|solar|renewable|oil|gas|utility|utilities)\b/i, "Energy & Utilities"],
+    [/\b(government|public sector|ministry|municipal|authority)\b/i, "Government & Public Sector"],
+    [/\b(association|federation|council|chamber|nonprofit|non-profit|foundation)\b/i, "Associations & Non-profits"],
+    [/\b(media|entertainment|publishing|broadcast|film)\b/i, "Media & Entertainment"],
+    [/\b(logistics|transport|shipping|freight|supply chain|warehouse)\b/i, "Logistics & Transportation"],
+    [/\b(hotel|hospitality|tourism|travel|resort)\b/i, "Hospitality & Travel"],
+    [/\b(consulting|advisory|legal|accounting|professional services)\b/i, "Professional Services"],
+  ];
+  return categories.find(([pattern]) => pattern.test(text))?.[1] || "";
+}
+
 function cleanCompanyTitle(title: string) {
   return title.split(/\s+[|–—]\s+|\s+-\s+/)[0].replace(/\b(home|official site|welcome)\b/gi, "").trim();
 }
@@ -1897,6 +2189,11 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function personalizeStoredGreeting(html: string, name: string) {
+  if (!name || name === "Sir/Madam") return html;
+  return html.replace(/Dear\s+(?:Sir\/?Madam|Sir or Madam)/i, `Dear ${escapeHtml(name)}`);
+}
+
 function cleanIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(String).filter((id) => /^[0-9a-f-]{36}$/i.test(id)))];
@@ -1919,7 +2216,8 @@ async function replyToForMail(mail: Record<string, any>) {
 }
 
 async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string) {
-  const htmlContent = cleanupUnresolvedHtml(mail.html_body);
+  const inferredName = inferContactName(contact.email, contact.full_name);
+  const htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferredName);
   const campaignSender = await senderForMail(mail);
   const campaignReplyToEmail = await replyToForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
@@ -1942,7 +2240,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
 
 async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string) {
   const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
-  const htmlContent = cleanupUnresolvedHtml(mail.html_body);
+  const htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferContactName(originalRecipient));
   const campaignSender = await senderForMail(mail);
   const campaignReplyToEmail = await replyToForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {

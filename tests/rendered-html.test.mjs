@@ -40,6 +40,33 @@ test("contacts and companies paginate their complete filtered datasets independe
   assert.match(page, /Showing.*companies/);
 });
 
+test("contacts can switch between practical large page sizes", () => {
+  assert.match(page, /const \[contactPageSize, setContactPageSize\] = useState\(50\)/);
+  assert.match(page, /Rows per page/);
+  assert.match(page, /<option value=\{50\}>50<\/option>/);
+  assert.match(page, /<option value=\{100\}>100<\/option>/);
+  assert.match(page, /<option value=\{1000\}>1,000<\/option>/);
+});
+
+test("companies expose every linked contact and keep company-first CRM relationships", () => {
+  assert.match(page, /View contacts/);
+  assert.match(page, /People & email addresses/);
+  assert.match(page, /contact\.companyId === selectedCompany\.id/);
+  assert.match(api, /contacts.*company_id: company\.id/s);
+  assert.match(api, /isPublicMailbox\(emailDomain\)[\s\S]*company:/);
+});
+
+test("company industry classification is inferable, editable, and filterable across CRM views", () => {
+  assert.match(page, /Industry \/ business domain/);
+  assert.match(page, /industry-domain-options/);
+  assert.match(page, /contactIndustry/);
+  assert.match(page, /companyIndustry/);
+  assert.match(page, /Edit company/);
+  assert.match(api, /inferCompanyIndustry/);
+  assert.match(api, /body\.action === "update_company"/);
+  assert.match(api, /industry: suppliedIndustry \|\| companies\[0\]\.industry/);
+});
+
 test("campaigns store a chosen Reply-To and support controlled delivery batches", () => {
   assert.match(page, /Reply-To email/);
   assert.match(page, /Enter another email/);
@@ -65,6 +92,30 @@ test("campaign audience permits safe deletion of unsent generated emails only", 
   assert.match(api, /delete_generated_email/);
   assert.match(api, /Sent or scheduled emails cannot be deleted/);
   assert.match(api, /generated_email_deleted/);
+});
+
+test("campaign deletion is explicit, cancels delivery, and preserves shared CRM and audit data", () => {
+  assert.match(page, /Delete this campaign/);
+  assert.match(page, /Type <b>\{selectedCampaignSummary\.name\}<\/b> to confirm/);
+  assert.match(page, /deleteSelectedCampaign/);
+  assert.match(api, /delete_campaign/);
+  assert.match(api, /Campaign deleted by an authorized operator/);
+  assert.match(api, /Brevo could not cancel/);
+  assert.match(api, /status: "campaign_deleted"/);
+  assert.match(api, /contacts_preserved: true/);
+  assert.match(api, /companies_preserved: true/);
+});
+
+test("campaigns open from a simple list into template, email, status, and delivery views", () => {
+  assert.match(page, /campaignDetailOpen/);
+  assert.match(page, /Back to campaigns/);
+  assert.match(page, /Original campaign template/);
+  assert.match(page, /Current sending status/);
+  assert.match(page, /Continue campaign/);
+  assert.match(page, /Stop remaining scheduled emails/);
+  assert.match(api, /email_template AS emailTemplate/);
+  assert.match(api, /abort_campaign_delivery/);
+  assert.match(api, /campaign_delivery_aborted/);
 });
 
 test("statistics uses real Brevo events with campaign, recipient, sender, event, and date filters", () => {

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import data from "./dashboard-data.json";
 import StatisticsDashboard from "./statistics-dashboard";
+import { inferContactName } from "./lib/name";
 
 type Section = "overview" | "create" | "campaigns" | "statistics" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type CampaignWorkspaceView = "overview" | "emails" | "delivery";
@@ -12,7 +13,7 @@ type CompanyRecord = { id: string; name: string; website?: string | null; indust
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
 type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
-type BackgroundJob = { id: string; campaignId: string; campaignName: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; updatedAt: string };
+type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; updatedAt: string };
 type ControlData = {
   ok: boolean;
   canManage?: boolean;
@@ -44,6 +45,27 @@ const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "companies", label: "Companies", icon: "◇" },
   { id: "settings", label: "Controls & APIs", icon: "⚙" },
   { id: "activity", label: "Activity", icon: "↗" },
+];
+
+const industryDomains = [
+  "Manufacturing",
+  "IT & Software",
+  "AI & Technology",
+  "Marketing & Advertising",
+  "Professional Services",
+  "Financial Services",
+  "Healthcare & Life Sciences",
+  "Education & Research",
+  "Retail & E-commerce",
+  "Construction & Real Estate",
+  "Automotive & Mobility",
+  "Agriculture & Food",
+  "Energy & Utilities",
+  "Government & Public Sector",
+  "Associations & Non-profits",
+  "Media & Entertainment",
+  "Logistics & Transportation",
+  "Hospitality & Travel",
 ];
 
 const statusLabel: Record<string, string> = {
@@ -99,24 +121,8 @@ function shortName(name: string) {
   return name.length > 43 ? `${name.slice(0, 43)}…` : name;
 }
 
-const genericMailboxWords = new Set([
-  "admin", "business", "care", "communications", "connect", "contact", "coordinator",
-  "enquiry", "enquiries", "forum", "general", "hello", "help", "hr", "info",
-  "mail", "marketing", "membership", "office", "president", "sales", "secretary",
-  "service", "support", "team",
-]);
-
 function contactDisplayName(contact: ContactRecord) {
-  if (contact.name?.trim() && contact.name.trim().toLowerCase() !== "sir/madam") return contact.name.trim();
-
-  const parts = contact.email.split("@")[0].toLowerCase().split(/[._-]+/).filter(Boolean);
-  const looksLikePerson = parts.length >= 2 && parts.length <= 4 && parts.every((part) =>
-    /^[a-z]{2,20}$/.test(part) && !genericMailboxWords.has(part)
-  );
-
-  return looksLikePerson
-    ? parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ")
-    : "Sir/Madam";
+  return inferContactName(contact.email, contact.name);
 }
 
 function personalizeGreeting(html: string, recipient: string, contacts: ContactRecord[]) {
@@ -193,7 +199,10 @@ export default function Home() {
   const [companyPage, setCompanyPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
   const [selectedContact, setSelectedContact] = useState<ContactRecord | null>(null);
+  const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
+  const [editingCompany, setEditingCompany] = useState<CompanyRecord | null>(null);
   const [contactForm, setContactForm] = useState({ name: "", email: "", role: "", company: "", industry: "", website: "", country: "" });
+  const [companyForm, setCompanyForm] = useState({ name: "", industry: "", website: "", country: "" });
   const [control, setControl] = useState<ControlData | null>(null);
   const [working, setWorking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -215,6 +224,7 @@ Please let me know a suitable time to connect.`,
     rawInput: "",
     websites: "",
     brief: "",
+    industry: "",
     senderEmail: "tanishka@iknowai.in",
     replyToEmail: "tanishka@iknowai.in",
   });
@@ -228,8 +238,13 @@ Please let me know a suitable time to connect.`,
   const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
   const [campaignWorkspaceView, setCampaignWorkspaceView] = useState<CampaignWorkspaceView>("overview");
+  const [campaignDetailOpen, setCampaignDetailOpen] = useState(false);
+  const [campaignDeleteId, setCampaignDeleteId] = useState<string | null>(null);
+  const [campaignDeleteConfirm, setCampaignDeleteConfirm] = useState("");
+  const [contactPageSize, setContactPageSize] = useState(50);
+  const [contactIndustry, setContactIndustry] = useState("all");
+  const [companyIndustry, setCompanyIndustry] = useState("all");
   const pageSize = 20;
-  const contactPageSize = 20;
   const companyPageSize = 18;
 
   async function loadControl() {
@@ -308,17 +323,27 @@ Please let me know a suitable time to connect.`,
   const displayContacts = useMemo<ContactRecord[]>(() => control?.liveContacts?.length ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
   const displayCompanies = useMemo<CompanyRecord[]>(() => control?.liveCompanies?.length ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
   const displayActivity = useMemo<ActivityRecord[]>(() => control?.liveActivity?.length ? control.liveActivity : data.activity as ActivityRecord[], [control?.liveActivity]);
+  const availableIndustries = useMemo(
+    () => [...new Set([...industryDomains, ...displayCompanies.map((company) => company.industry || "").filter(Boolean)])].sort((a, b) => a.localeCompare(b)),
+    [displayCompanies],
+  );
   const filteredContacts = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return displayContacts.filter((contact) => !term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
-  }, [displayContacts, search]);
+    return displayContacts.filter((contact) => {
+      const matchesIndustry = contactIndustry === "all" || (contact.industry || "") === contactIndustry;
+      return matchesIndustry && (!term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
+    });
+  }, [displayContacts, search, contactIndustry]);
   const contactPages = Math.max(1, Math.ceil(filteredContacts.length / contactPageSize));
   const safeContactPage = Math.min(contactPage, contactPages);
   const pagedContacts = filteredContacts.slice((safeContactPage - 1) * contactPageSize, safeContactPage * contactPageSize);
   const filteredCompanies = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return displayCompanies.filter((company) => !term || `${company.name} ${company.industry || ""} ${company.website || ""}`.toLowerCase().includes(term));
-  }, [displayCompanies, search]);
+    return displayCompanies.filter((company) => {
+      const matchesIndustry = companyIndustry === "all" || (company.industry || "") === companyIndustry;
+      return matchesIndustry && (!term || `${company.name} ${company.industry || ""} ${company.website || ""}`.toLowerCase().includes(term));
+    });
+  }, [displayCompanies, search, companyIndustry]);
   const companyPages = Math.max(1, Math.ceil(filteredCompanies.length / companyPageSize));
   const safeCompanyPage = Math.min(companyPage, companyPages);
   const pagedCompanies = filteredCompanies.slice((safeCompanyPage - 1) * companyPageSize, safeCompanyPage * companyPageSize);
@@ -472,19 +497,27 @@ Please let me know a suitable time to connect.`,
   }, [displayCampaigns, queueForm.campaignId]);
 
   useEffect(() => {
-    if (!selectedEmail && !selectedContact) return;
+    setCampaignDeleteId(null);
+    setCampaignDeleteConfirm("");
+  }, [queueForm.campaignId]);
+
+  useEffect(() => {
+    if (!selectedEmail && !selectedContact && !selectedCompany && !editingCompany) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setSelectedEmail(null);
         setSelectedContact(null);
+        setSelectedCompany(null);
+        setEditingCompany(null);
       }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [selectedEmail, selectedContact]);
+  }, [selectedEmail, selectedContact, selectedCompany, editingCompany]);
 
   function switchSection(next: Section) {
     setSection(next);
+    if (next === "campaigns") setCampaignDetailOpen(false);
     setMobileMenuOpen(false);
     setSearch("");
     setPage(1);
@@ -502,6 +535,7 @@ Please let me know a suitable time to connect.`,
     setSelectedIds(new Set());
     setBulkMode(null);
     switchSection("campaigns");
+    setCampaignDetailOpen(true);
   }
 
   function toggleSelected(id: string, checked: boolean) {
@@ -596,6 +630,39 @@ Please let me know a suitable time to connect.`,
         return next;
       });
       if (selectedEmail?.id === email.id) setSelectedEmail(null);
+    }
+  }
+
+  async function deleteSelectedCampaign() {
+    if (!selectedCampaignSummary || campaignDeleteConfirm !== selectedCampaignSummary.name) return;
+    const result = await runAction(
+      {
+        action: "delete_campaign",
+        campaignId: selectedCampaignSummary.id,
+        confirmName: campaignDeleteConfirm,
+      },
+      `${selectedCampaignSummary.name} was deleted from the campaign workspace.`,
+    );
+    if (result?.ok) {
+      setCampaignDeleteId(null);
+      setCampaignDeleteConfirm("");
+      setSelectedIds(new Set());
+      setSelectedEmail(null);
+      setCampaignWorkspaceView("overview");
+      setCampaignDetailOpen(false);
+      setPage(1);
+    }
+  }
+
+  async function abortSelectedCampaignDelivery() {
+    if (!selectedCampaignSummary) return;
+    const result = await runAction(
+      { action: "abort_campaign_delivery", campaignId: selectedCampaignSummary.id },
+      "The remaining scheduled campaign delivery was stopped. Cancelled emails are approved again and can be rescheduled later.",
+    );
+    if (result?.ok) {
+      setQueueForm((current) => ({ ...current, confirmed: false, scheduledFor: "" }));
+      setCampaignSendConfirm("");
     }
   }
 
@@ -789,6 +856,32 @@ Please let me know a suitable time to connect.`,
     if (result?.ok) setSelectedContact(null);
   }
 
+  function openCompanyEditor(company: CompanyRecord) {
+    setSelectedCompany(null);
+    setEditingCompany(company);
+    setCompanyForm({
+      name: company.name || "",
+      industry: company.industry || "",
+      website: company.website || "",
+      country: company.country || "",
+    });
+  }
+
+  async function saveCompany() {
+    if (!editingCompany) return;
+    if (!companyForm.name.trim()) {
+      setNoticeTone("error");
+      setNotice("Add the company or organization name.");
+      return;
+    }
+    const result = await runAction({
+      action: "update_company",
+      companyId: editingCompany.id,
+      ...companyForm,
+    }, "Company details and its linked contacts were updated in the database.");
+    if (result?.ok) setEditingCompany(null);
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -900,14 +993,14 @@ Please let me know a suitable time to connect.`,
             <section className="campaigns-hub">
               <article className="panel campaign-portfolio-hero">
                 <div>
-                  <p className="eyebrow">Campaign portfolio</p>
-                  <h2>Every outreach campaign in one place</h2>
-                  <p>See what is still being drafted, ready for approval, scheduled, running, sent, or needs attention.</p>
+                  <p className="eyebrow">{campaignDetailOpen ? "Campaign workspace" : "Campaign portfolio"}</p>
+                  <h2>{campaignDetailOpen ? selectedCampaignSummary?.name || "Campaign details" : "Every outreach campaign in one place"}</h2>
+                  <p>{campaignDetailOpen ? "Review the template, generated emails, live status, and delivery controls for this campaign." : "Choose a campaign to open its emails, template, status, and sending controls."}</p>
                 </div>
-                <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>
+                {campaignDetailOpen ? <button className="quiet-action campaign-back-button" onClick={() => { setCampaignDetailOpen(false); setCampaignWorkspaceView("overview"); setSelectedIds(new Set()); setBulkMode(null); }}>← Back to campaigns</button> : <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>}
               </article>
 
-              {activeBackgroundJobs.length > 0 && (
+              {!campaignDetailOpen && activeBackgroundJobs.length > 0 && (
                 <section className="panel background-campaign-jobs" aria-live="polite">
                   <div className="panel-heading"><div><p className="eyebrow">Background research</p><h2>{activeBackgroundJobs.length} campaign{activeBackgroundJobs.length === 1 ? "" : "s"} processing</h2><p className="section-helper">Website crawling and draft generation continue on the server when this dashboard is closed.</p></div><span>Auto-refreshing</span></div>
                   <div className="background-job-list">
@@ -919,7 +1012,7 @@ Please let me know a suitable time to connect.`,
                 </section>
               )}
 
-              <article className="panel campaign-workspace-switcher">
+              {campaignDetailOpen && <article className="panel campaign-workspace-switcher">
                 <div>
                   <p className="eyebrow">Campaign workspace</p>
                   <label><span>Working campaign</span><select value={selectedCampaignSummary?.id || ""} onChange={(event) => { const campaign = displayCampaigns.find((item) => item.id === event.target.value); setQueueForm((current) => ({ ...current, campaignId: event.target.value, confirmed: false })); if (campaign) setEmailCampaign(campaign.name); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>{displayCampaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}</select></label>
@@ -929,17 +1022,17 @@ Please let me know a suitable time to connect.`,
                   <button className={campaignWorkspaceView === "emails" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "emails"} onClick={() => { setCampaignWorkspaceView("emails"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Emails <span>{selectedCampaignSummary?.total || 0}</span></button>
                   <button className={campaignWorkspaceView === "delivery" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "delivery"} onClick={() => { setCampaignWorkspaceView("delivery"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Approval & delivery</button>
                 </div>
-              </article>
+              </article>}
 
               {campaignWorkspaceView === "overview" && (
                 <>
-              <section className="campaign-portfolio-metrics" aria-label="Campaign status totals">
+              {!campaignDetailOpen && <section className="campaign-portfolio-metrics" aria-label="Campaign status totals">
                 <button className={campaignStatusFilter === "all" ? "active" : ""} onClick={() => setCampaignStatusFilter("all")}><span>All campaigns</span><strong>{campaignPortfolioStats.total}</strong><small>Complete portfolio</small></button>
                 <button className={campaignStatusFilter === "draft_pending_review" ? "active" : ""} onClick={() => setCampaignStatusFilter("draft_pending_review")}><span>Draft</span><strong>{campaignPortfolioStats.draft}</strong><small>Needs review</small></button>
                 <button className={campaignStatusFilter === "active" ? "active" : ""} onClick={() => setCampaignStatusFilter("active")}><span>Active</span><strong>{campaignPortfolioStats.active}</strong><small>Ready or running</small></button>
                 <button className={campaignStatusFilter === "completed" ? "active" : ""} onClick={() => setCampaignStatusFilter("completed")}><span>Sent</span><strong>{campaignPortfolioStats.sent}</strong><small>Fully completed</small></button>
                 <button className={campaignStatusFilter === "needs_attention" ? "active" : ""} onClick={() => setCampaignStatusFilter("needs_attention")}><span>Attention</span><strong>{campaignPortfolioStats.attention}</strong><small>Delivery issues</small></button>
-              </section>
+              </section>}
 
               {paused && (
                 <section className="campaign-safety-note">
@@ -949,15 +1042,15 @@ Please let me know a suitable time to connect.`,
                 </section>
               )}
 
-              <section className="campaign-portfolio-layout">
-                <article className="panel campaign-directory">
+              <section className={campaignDetailOpen ? "campaign-portfolio-layout campaign-detail-only" : "campaign-portfolio-layout"}>
+                {!campaignDetailOpen && <article className="panel campaign-directory">
                   <div className="panel-heading">
                     <div><p className="eyebrow">Campaign directory</p><h2>{filteredCampaigns.length} campaigns</h2></div>
                     <label className="campaign-status-select"><span>Status</span><select value={campaignStatusFilter} onChange={(event) => setCampaignStatusFilter(event.target.value)}><option value="all">All statuses</option><option value="draft_pending_review">Draft</option><option value="active">Active</option><option value="approved">Ready</option><option value="scheduled">Scheduled</option><option value="running">Running</option><option value="completed">Sent</option><option value="needs_attention">Needs attention</option></select></label>
                   </div>
                   <div className="campaign-directory-list">
                     {filteredCampaigns.map((campaign) => (
-                      <button key={campaign.id} className={selectedCampaignSummary?.id === campaign.id ? "campaign-directory-row active" : "campaign-directory-row"} onClick={() => setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false }))}>
+                      <button key={campaign.id} className={selectedCampaignSummary?.id === campaign.id ? "campaign-directory-row active" : "campaign-directory-row"} onClick={() => { setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false })); setEmailCampaign(campaign.name); setCampaignWorkspaceView("overview"); setCampaignDetailOpen(true); setSelectedIds(new Set()); setBulkMode(null); }}>
                         <span className="campaign-symbol">{campaign.name.slice(0, 2).toUpperCase()}</span>
                         <span className="campaign-directory-copy"><strong>{campaign.name}</strong><small>{campaign.researchJob && ["queued", "researching"].includes(campaign.researchJob.status) ? `${campaign.researchJob.completedItems} of ${campaign.researchJob.totalItems} sources researched` : `${campaign.total} recipients · Updated ${compactDate(campaign.latestGeneratedAt)}`}</small><i><b style={{ width: `${campaign.researchProgress ?? campaign.progress}%` }} /></i></span>
                         <span className="campaign-directory-result"><StatusPill value={campaign.lifecycle} /><small>{campaign.researchProgress !== null && ["queued", "researching"].includes(campaign.lifecycle) ? `${campaign.researchProgress}% research complete` : `${campaign.progress}% delivered or scheduled`}</small></span>
@@ -966,9 +1059,9 @@ Please let me know a suitable time to connect.`,
                     ))}
                     {!filteredCampaigns.length && <div className="empty-state">No campaigns match this status or search.</div>}
                   </div>
-                </article>
+                </article>}
 
-                {selectedCampaignSummary && (
+                {campaignDetailOpen && selectedCampaignSummary && (
                   <article className="panel campaign-detail-panel">
                     <div className="campaign-detail-heading">
                       <div className="campaign-symbol">{selectedCampaignSummary.name.slice(0, 2).toUpperCase()}</div>
@@ -990,6 +1083,28 @@ Please let me know a suitable time to connect.`,
                       <span><b>{selectedCampaignSummary.failed}</b>Failed</span>
                     </div>
 
+                    <div className="campaign-template-panel">
+                      <div>
+                        <p className="eyebrow">Original campaign template</p>
+                        <h3>{selectedCampaignSummary.researchJob?.topic || "Email template"}</h3>
+                        <span>{selectedCampaignSummary.researchJob?.emailTemplate ? "This is the source template used to personalize every recipient email." : "This legacy campaign was created before source templates were retained in the campaign workspace."}</span>
+                      </div>
+                      {selectedCampaignSummary.researchJob?.emailTemplate
+                        ? <pre>{selectedCampaignSummary.researchJob.emailTemplate}</pre>
+                        : <div className="empty-state">Original template unavailable. Generated emails remain available in the Emails tab.</div>}
+                    </div>
+
+                    <div className="campaign-live-status">
+                      <div><p className="eyebrow">Current sending status</p><h3>{prettyStatus(selectedCampaignSummary.lifecycle)}</h3></div>
+                      <div>
+                        <span><b>{selectedCampaignSummary.sent}</b> sent</span>
+                        <span><b>{selectedCampaignSummary.scheduled}</b> scheduled</span>
+                        <span><b>{selectedCampaignSummary.approved}</b> ready</span>
+                        <span><b>{selectedCampaignSummary.failed}</b> failed</span>
+                      </div>
+                      <p>{selectedCampaignSummary.firstScheduledAt ? `Scheduled activity begins ${new Date(selectedCampaignSummary.firstScheduledAt).toLocaleString("en-IN")}.` : "No future campaign delivery is scheduled."} {selectedCampaignSummary.researchJob?.lastError || ""}</p>
+                    </div>
+
                     <div className="campaign-lifecycle">
                       <p className="eyebrow">Lifecycle</p>
                       <ol>
@@ -1007,7 +1122,29 @@ Please let me know a suitable time to connect.`,
 
                     <div className="campaign-detail-actions">
                       <button onClick={() => openCampaignWorkspace("emails", selectedCampaignSummary.name)}>Review emails</button>
-                      <button className="primary-action" onClick={() => openCampaignWorkspace("delivery", selectedCampaignSummary.name)}>Manage approval & schedule</button>
+                      <button className="primary-action" onClick={() => openCampaignWorkspace("delivery", selectedCampaignSummary.name)}>{selectedCampaignSummary.scheduled || selectedCampaignSummary.sent ? "Continue campaign" : "Approve, schedule, or send"}</button>
+                      {selectedCampaignSummary.scheduled > 0 && <button className="danger-action" disabled={working || !control?.canManage} onClick={abortSelectedCampaignDelivery}>{working ? "Stopping…" : "Stop remaining scheduled emails"}</button>}
+                    </div>
+
+                    <div className="campaign-delete-zone">
+                      <div>
+                        <strong>Delete this campaign</strong>
+                        <p>Removes every generated email from the workspace, stops background research, and cancels scheduled Brevo delivery. Contacts, companies, and sent-email audit history are kept.</p>
+                      </div>
+                      {campaignDeleteId !== selectedCampaignSummary.id ? (
+                        <button type="button" disabled={working || !control?.canManage} onClick={() => { setCampaignDeleteId(selectedCampaignSummary.id); setCampaignDeleteConfirm(""); }}>Delete campaign…</button>
+                      ) : (
+                        <div className="campaign-delete-confirmation">
+                          <label>
+                            <span>Type <b>{selectedCampaignSummary.name}</b> to confirm</span>
+                            <input autoFocus value={campaignDeleteConfirm} onChange={(event) => setCampaignDeleteConfirm(event.target.value)} placeholder="Complete campaign name" />
+                          </label>
+                          <div>
+                            <button type="button" className="quiet-action" disabled={working} onClick={() => { setCampaignDeleteId(null); setCampaignDeleteConfirm(""); }}>Cancel</button>
+                            <button type="button" className="danger-action" disabled={working || campaignDeleteConfirm !== selectedCampaignSummary.name} onClick={deleteSelectedCampaign}>{working ? "Deleting campaign…" : `Delete campaign and ${selectedCampaignSummary.total} emails`}</button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </article>
                 )}
@@ -1015,7 +1152,7 @@ Please let me know a suitable time to connect.`,
                 </>
               )}
 
-              {campaignWorkspaceView === "emails" && selectedCampaignSummary && (
+              {campaignDetailOpen && campaignWorkspaceView === "emails" && selectedCampaignSummary && (
                 <section className="panel data-panel campaign-email-workspace">
                   <div className="panel-heading filters-heading">
                     <div><p className="eyebrow">Campaign emails</p><h2>{selectedCampaignSummary.name}</h2><p className="section-helper">{campaignEmailRows.length} emails in this campaign. Preview, test, approve, schedule, or send only the selected records.</p></div>
@@ -1062,7 +1199,7 @@ Please let me know a suitable time to connect.`,
                 </section>
               )}
 
-              {campaignWorkspaceView === "delivery" && selectedCampaign && (
+              {campaignDetailOpen && campaignWorkspaceView === "delivery" && selectedCampaign && (
                 <section className="campaign-queue campaign-delivery-workspace">
                   <article className="panel campaign-workspace">
                     <div className="campaign-workspace-header">
@@ -1203,6 +1340,11 @@ Please let me know a suitable time to connect.`,
                       <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
                     </label>
                   </div>
+                  <label className="brief-field industry-domain-field">
+                    <span>Industry / business domain</span>
+                    <input list="industry-domain-options" value={intakeForm.industry} onChange={(event) => setIntakeForm({ ...intakeForm, industry: event.target.value })} placeholder="Auto-detect from each company website, or choose/type a default" />
+                    <small>Optional batch default. Leave blank to classify every company independently from its website and research.</small>
+                  </label>
                   {websiteScans.length > 0 && (
                     <section className="website-scan-results" aria-live="polite">
                       <div><span><strong>Website scan results</strong><small>{websiteScans.length} website{websiteScans.length === 1 ? "" : "s"} checked independently</small></span><button type="button" onClick={() => setWebsiteScans([])}>Clear results</button></div>
@@ -1373,7 +1515,14 @@ Please let me know a suitable time to connect.`,
 
           {section === "contacts" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div><span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span></div>
+              <div className="panel-heading">
+                <div><p className="eyebrow">Audience</p><h2>{displayContacts.length} contacts</h2></div>
+                <div className="contact-list-controls">
+                  <span>{displayContacts.filter((contact) => contactDisplayName(contact) !== "Sir/Madam").length} named contacts</span>
+                  <label><span>Industry</span><select value={contactIndustry} onChange={(event) => { setContactIndustry(event.target.value); setContactPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label>
+                  <label><span>Rows per page</span><select value={contactPageSize} onChange={(event) => { setContactPageSize(Number(event.target.value)); setContactPage(1); }}><option value={50}>50</option><option value={100}>100</option><option value={1000}>1,000</option></select></label>
+                </div>
+              </div>
               <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
                 {pagedContacts.map((contact) => <tr key={contact.id}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>)}
               </tbody></table></div>
@@ -1387,9 +1536,9 @@ Please let me know a suitable time to connect.`,
 
           {section === "companies" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><span>Deduplicated by domain</span></div>
+              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><div className="contact-list-controls"><span>Deduplicated by domain</span><label><span>Industry</span><select value={companyIndustry} onChange={(event) => { setCompanyIndustry(event.target.value); setCompanyPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label></div></div>
               <div className="company-grid">
-                {pagedCompanies.map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></article>)}
+                {pagedCompanies.map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small><div className="company-card-actions"><button type="button" onClick={() => setSelectedCompany(company)}>View contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit company</button>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></div></article>)}
               </div>
               {!pagedCompanies.length && <div className="empty-state">No companies match your search.</div>}
               <div className="pagination">
@@ -1433,7 +1582,7 @@ Please let me know a suitable time to connect.`,
               </div>
               <div className="contact-form-section"><div><strong>Organization</strong><span>Organization changes are shared with its other contacts.</span></div>
                 <label><span>Company or organization</span><input required value={contactForm.company} onChange={(event) => setContactForm({ ...contactForm, company: event.target.value })} /></label>
-                <label><span>Industry</span><input value={contactForm.industry} onChange={(event) => setContactForm({ ...contactForm, industry: event.target.value })} placeholder="Example: Automotive manufacturing" /></label>
+                <label><span>Industry / business domain</span><input list="industry-domain-options" value={contactForm.industry} onChange={(event) => setContactForm({ ...contactForm, industry: event.target.value })} placeholder="Choose or type a company industry" /><small>This classification belongs to the company and is shared with every linked contact.</small></label>
                 <label><span>Website</span><input type="url" value={contactForm.website} onChange={(event) => setContactForm({ ...contactForm, website: event.target.value })} placeholder="https://company.com" /></label>
                 <label><span>Country</span><input value={contactForm.country} onChange={(event) => setContactForm({ ...contactForm, country: event.target.value })} placeholder="Example: India" /></label>
               </div>
@@ -1442,6 +1591,52 @@ Please let me know a suitable time to connect.`,
           </aside>
         </div>
       )}
+      {selectedCompany && (
+        <div className="drawer-backdrop" onMouseDown={() => setSelectedCompany(null)}>
+          <aside className="company-contact-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label={`${selectedCompany.name} contacts`} role="dialog" aria-modal="true">
+            <div className="drawer-header">
+              <div><p className="eyebrow">Company profile</p><h2>{selectedCompany.name}</h2><p>Every person below is linked to this company in the database.</p></div>
+              <button type="button" onClick={() => setSelectedCompany(null)} aria-label="Close company profile">×</button>
+            </div>
+            <div className="company-profile-summary">
+              <span><b>{displayContacts.filter((contact) => contact.companyId === selectedCompany.id).length}</b>Linked contacts</span>
+              <span><b>{selectedCompany.drafts}</b>Generated emails</span>
+              <span><b>{selectedCompany.industry || "Pending"}</b>Industry / domain</span>
+              <span><b>{selectedCompany.country || "—"}</b>Country</span>
+            </div>
+            <div className="company-contact-list">
+              <div className="company-contact-list-heading"><div><p className="eyebrow">People & email addresses</p><h3>{displayContacts.filter((contact) => contact.companyId === selectedCompany.id).length} contacts</h3></div></div>
+              {displayContacts.filter((contact) => contact.companyId === selectedCompany.id).map((contact) => (
+                <article key={contact.id}>
+                  <div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a><small>{contact.role || "Role not added"} · {prettyStatus(contact.confidence)}</small></div>
+                  <button type="button" disabled={!control?.canManage} onClick={() => { setSelectedCompany(null); openContactEditor(contact); }}>Edit</button>
+                </article>
+              ))}
+              {!displayContacts.some((contact) => contact.companyId === selectedCompany.id) && <div className="empty-state">No contacts are linked to this company yet.</div>}
+            </div>
+            <div className="drawer-footer"><span>Company details are shared by all linked contacts.</span><div><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(selectedCompany)}>Edit company</button>{selectedCompany.website && <a href={selectedCompany.website} target="_blank" rel="noreferrer">Open company website</a>}</div></div>
+          </aside>
+        </div>
+      )}
+      {editingCompany && (
+        <div className="drawer-backdrop contact-editor-backdrop" onMouseDown={() => setEditingCompany(null)}>
+          <aside className="contact-editor company-editor" onMouseDown={(event) => event.stopPropagation()} aria-label="Edit company" role="dialog" aria-modal="true">
+            <div className="drawer-header"><div><p className="eyebrow">Database company</p><h2>Edit company details</h2><p>Industry and organization changes automatically appear for every linked contact.</p></div><button type="button" onClick={() => setEditingCompany(null)} aria-label="Close company editor">×</button></div>
+            <form className="contact-editor-form company-editor-form" onSubmit={(event) => { event.preventDefault(); saveCompany(); }}>
+              <div className="contact-form-section"><div><strong>Organization</strong><span>Use verified information where available.</span></div>
+                <label><span>Company or organization</span><input required value={companyForm.name} onChange={(event) => setCompanyForm({ ...companyForm, name: event.target.value })} /></label>
+                <label><span>Industry / business domain</span><input list="industry-domain-options" value={companyForm.industry} onChange={(event) => setCompanyForm({ ...companyForm, industry: event.target.value })} placeholder="Choose or type an industry" /><small>You can select a standard category or enter a more specific one.</small></label>
+                <label><span>Website</span><input type="url" value={companyForm.website} onChange={(event) => setCompanyForm({ ...companyForm, website: event.target.value })} placeholder="https://company.com" /></label>
+                <label><span>Country</span><input value={companyForm.country} onChange={(event) => setCompanyForm({ ...companyForm, country: event.target.value })} placeholder="Example: India" /></label>
+              </div>
+              <div className="contact-editor-actions"><button type="button" className="quiet-action" onClick={() => setEditingCompany(null)}>Cancel</button><button className="primary-action" disabled={working}>{working ? "Saving…" : "Save company"}</button></div>
+            </form>
+          </aside>
+        </div>
+      )}
+      <datalist id="industry-domain-options">
+        {availableIndustries.map((industry) => <option value={industry} key={industry} />)}
+      </datalist>
       {notice && <div className={`toast ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss notification">×</button></div>}
     </div>
   );
