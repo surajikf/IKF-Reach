@@ -11,3 +11,10 @@ export function getDb() {
 
   return drizzle(env.DB, { schema });
 }
+
+export function getQueueDb(): D1Database {
+  if (!env.DB) {
+    throw new Error("The background campaign queue is not available.");
+  }
+  return env.DB;
+}

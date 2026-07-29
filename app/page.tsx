@@ -10,6 +10,8 @@ type ContactRecord = { id: string; companyId?: string | null; name?: string | nu
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
+type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
+type BackgroundJob = { id: string; campaignId: string; campaignName: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; updatedAt: string };
 type ControlData = {
   ok: boolean;
   canManage?: boolean;
@@ -25,6 +27,7 @@ type ControlData = {
   liveActivity?: ActivityRecord[];
   liveStats?: LiveStats;
   sender?: { name: string; email: string };
+  availableSenders?: Array<{ name: string; email: string; active: boolean }>;
   replyTo?: string;
   refreshedAt?: string;
   scheduling?: { provider: string; timezone: string; maximumHoursAhead: number };
@@ -52,6 +55,11 @@ const statusLabel: Record<string, string> = {
   scheduled: "Scheduled",
   running: "Running",
   completed: "Sent",
+  queued: "Queued",
+  researching: "Researching",
+  completed_with_issues: "Completed with issues",
+  research_failed: "Research failed",
+  research_complete_no_contacts: "No contacts found",
   needs_attention: "Needs attention",
   empty: "Empty",
   paused_no_credits: "Paused",
@@ -195,10 +203,15 @@ Please let me know a suitable time to connect.`,
     rawInput: "",
     websites: "",
     brief: "",
+    senderEmail: "tanishka@iknowai.in",
   });
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
+  const [websiteScans, setWebsiteScans] = useState<WebsiteScanRecord[]>([]);
+  const [scanningWebsites, setScanningWebsites] = useState(false);
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", delayMinutes: 5, confirmed: false });
+  const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send">("schedule");
+  const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
   const [campaignWorkspaceView, setCampaignWorkspaceView] = useState<CampaignWorkspaceView>("overview");
   const pageSize = 20;
@@ -217,6 +230,20 @@ Please let me know a suitable time to connect.`,
   }
 
   useEffect(() => { loadControl(); }, []);
+
+  useEffect(() => {
+    const available = control?.availableSenders || [];
+    if (available.length && !available.some((item) => item.email === intakeForm.senderEmail)) {
+      setIntakeForm((current) => ({ ...current, senderEmail: available[0].email }));
+    }
+  }, [control?.availableSenders, intakeForm.senderEmail]);
+
+  useEffect(() => {
+    const active = (control?.jobs || []).some((job) => ["queued", "researching"].includes(String(job.status)));
+    if (!active) return;
+    const timer = window.setInterval(loadControl, 5000);
+    return () => window.clearInterval(timer);
+  }, [control?.jobs]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return;
@@ -272,6 +299,8 @@ Please let me know a suitable time to connect.`,
     failed: data.summary.failed,
   }, [control?.liveStats]);
   const paused = control?.settings?.paused ?? true;
+  const backgroundJobs = useMemo<BackgroundJob[]>(() => (control?.jobs || []) as BackgroundJob[], [control?.jobs]);
+  const activeBackgroundJobs = useMemo(() => backgroundJobs.filter((job) => ["queued", "researching"].includes(job.status)), [backgroundJobs]);
   const displayCampaigns = useMemo(() => control?.campaigns?.length ? control.campaigns.map((campaign) => ({
     id: String(campaign.id || campaign.name),
     name: String(campaign.name || "Outreach"),
@@ -312,8 +341,10 @@ Please let me know a suitable time to connect.`,
     const failed = emails.filter((email) => String(email.sendStatus || email.status).includes("fail") || String(email.sendStatus || email.status).includes("not_sent")).length;
     const latestGeneratedAt = emails.reduce<string | null>((latest, email) => !latest || email.generatedAt > latest ? email.generatedAt : latest, null);
     const queued = scheduledCampaignGroups.find((item) => item.id === campaign.id);
+    const researchJob = backgroundJobs.find((job) => job.campaignId === campaign.id);
     let lifecycle = "empty";
-    if (failed > 0) lifecycle = "needs_attention";
+    if (researchJob && ["queued", "researching"].includes(researchJob.status)) lifecycle = researchJob.status;
+    else if (failed > 0 || researchJob?.status === "completed_with_issues" || researchJob?.status === "failed") lifecycle = "needs_attention";
     else if (sent > 0 && sent < emails.length) lifecycle = "running";
     else if (emails.length > 0 && sent === emails.length) lifecycle = "completed";
     else if (scheduled > 0) lifecycle = "scheduled";
@@ -331,18 +362,20 @@ Please let me know a suitable time to connect.`,
       failed,
       lifecycle,
       progress: emails.length ? Math.round((progressed / emails.length) * 100) : 0,
+      researchJob,
+      researchProgress: researchJob?.totalItems ? Math.round((researchJob.completedItems / researchJob.totalItems) * 100) : null,
       latestGeneratedAt,
       firstScheduledAt: queued?.first || null,
       lastScheduledAt: queued?.last || null,
     };
-  }), [displayCampaigns, displayEmails, scheduledCampaignGroups]);
+  }), [displayCampaigns, displayEmails, scheduledCampaignGroups, backgroundJobs]);
   const selectedCampaignSummary = campaignSummaries.find((campaign) => campaign.id === queueForm.campaignId) || campaignSummaries[0];
   const filteredCampaigns = useMemo(() => {
     const term = search.trim().toLowerCase();
     return campaignSummaries.filter((campaign) => {
       const matchesTerm = !term || `${campaign.name} ${campaign.senderName} ${campaign.senderEmail}`.toLowerCase().includes(term);
       const matchesStatus = campaignStatusFilter === "all" ||
-        (campaignStatusFilter === "active" && ["approved", "scheduled", "running"].includes(campaign.lifecycle)) ||
+        (campaignStatusFilter === "active" && ["queued", "researching", "approved", "scheduled", "running"].includes(campaign.lifecycle)) ||
         campaign.lifecycle === campaignStatusFilter;
       return matchesTerm && matchesStatus;
     });
@@ -518,7 +551,72 @@ Please let me know a suitable time to connect.`,
     }
   }
 
-  async function runIntelligenceStudio() {
+  async function sendSelectedCampaignNow() {
+    if (!selectedCampaign) return;
+    const result = await runAction({
+      action: "send_campaign",
+      campaignId: selectedCampaign.id,
+      confirmText: campaignSendConfirm,
+    }, `${selectedCampaign.name} was submitted to Brevo for immediate delivery.`);
+    if (result?.ok) {
+      setCampaignSendConfirm("");
+      setNoticeTone(result.failed ? "error" : "success");
+      setNotice(`${result.sent} campaign emails were accepted by Brevo${result.failed ? `; ${result.failed} need attention` : ""}.`);
+    }
+  }
+
+  async function runWebsiteDiscovery() {
+    if (!intakeForm.websites.trim()) {
+      setNoticeTone("error");
+      setNotice("Enter at least one company website to scan.");
+      return;
+    }
+    setScanningWebsites(true);
+    setNotice("");
+    try {
+      const response = await fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "discover_website_contacts", websites: intakeForm.websites }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "The websites could not be scanned.");
+      const scans = (result.websites || []) as WebsiteScanRecord[];
+      setWebsiteScans(scans);
+      const uniqueFound = new Map<string, string>();
+      for (const scan of scans) {
+        for (const email of scan.discoveredEmails) {
+          const normalizedEmail = email.toLowerCase();
+          if (!uniqueFound.has(normalizedEmail)) uniqueFound.set(normalizedEmail, `${email}, ${scan.companyName || ""}, ${scan.website || scan.input}`);
+        }
+      }
+      const foundLines = [...uniqueFound.values()];
+      if (foundLines.length) {
+        setIntakeForm((current) => {
+          const existingEmails = new Set((current.rawInput.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []).map((email) => email.toLowerCase()));
+          const additions = foundLines.filter((line) => {
+            const email = line.split(",")[0].trim().toLowerCase();
+            if (existingEmails.has(email)) return false;
+            existingEmails.add(email);
+            return true;
+          });
+          return { ...current, rawInput: [current.rawInput.trim(), ...additions].filter(Boolean).join("\n") };
+        });
+        setNoticeTone("success");
+        setNotice(`Found ${foundLines.length} public email address${foundLines.length === 1 ? "" : "es"} across ${scans.filter((scan) => scan.ok).length} website${scans.filter((scan) => scan.ok).length === 1 ? "" : "s"}. They were added to the campaign contact list for review.`);
+      } else {
+        setNoticeTone("error");
+        setNotice("The websites were scanned, but no public email addresses were found. Review the per-website results below.");
+      }
+    } catch (error) {
+      setNoticeTone("error");
+      setNotice(error instanceof Error ? error.message : "The websites could not be scanned.");
+    } finally {
+      setScanningWebsites(false);
+    }
+  }
+
+  async function runIntelligenceStudio(intent: "draft" | "delivery" = "draft") {
     let document: Record<string, string> | undefined;
     if (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile) {
       setNoticeTone("error");
@@ -539,8 +637,29 @@ Please let me know a suitable time to connect.`,
       });
       document = { name: intakeFile.name, type: intakeFile.type, dataBase64: dataUrl };
     }
-    const result = await runAction({ action: "research_batch", ...intakeForm, document }, "Research completed and personalized drafts were created for review.");
-    if (result?.ok) setIntakeResults(result.results || []);
+    const result = await runAction(
+      { action: "queue_background_campaign", ...intakeForm, document },
+      "Campaign research was queued. It will continue after this tab is closed.",
+    );
+    if (result?.ok && result.job?.id) {
+      setIntakeResults([]);
+      setWebsiteScans([]);
+      const kickoff = await fetch("/api/background-campaign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: result.job.id }),
+      });
+      if (!kickoff.ok) {
+        setNoticeTone("error");
+        setNotice("The campaign was saved, but its background worker did not start. Open Campaigns and retry.");
+      }
+      setQueueForm((current) => ({ ...current, campaignId: result.campaign.id, confirmed: false }));
+      if (intent === "delivery") {
+        setCampaignWorkspaceView("overview");
+        switchSection("campaigns");
+      }
+      await loadControl();
+    }
   }
 
   function handleFileSelection(file: File | null) {
@@ -713,6 +832,18 @@ Please let me know a suitable time to connect.`,
                 <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>
               </article>
 
+              {activeBackgroundJobs.length > 0 && (
+                <section className="panel background-campaign-jobs" aria-live="polite">
+                  <div className="panel-heading"><div><p className="eyebrow">Background research</p><h2>{activeBackgroundJobs.length} campaign{activeBackgroundJobs.length === 1 ? "" : "s"} processing</h2><p className="section-helper">Website crawling and draft generation continue on the server when this dashboard is closed.</p></div><span>Auto-refreshing</span></div>
+                  <div className="background-job-list">
+                    {activeBackgroundJobs.map((job) => {
+                      const progress = job.totalItems ? Math.round((job.completedItems / job.totalItems) * 100) : 0;
+                      return <article key={job.id}><span className="campaign-symbol">{job.campaignName.slice(0, 2).toUpperCase()}</span><div><strong>{job.campaignName}</strong><small>{job.completedItems} of {job.totalItems} sources processed · {job.contactsFound} contacts found · {job.draftsCreated} drafts created</small><i><b style={{ width: `${progress}%` }} /></i></div><StatusPill value={job.status} /></article>;
+                    })}
+                  </div>
+                </section>
+              )}
+
               <article className="panel campaign-workspace-switcher">
                 <div>
                   <p className="eyebrow">Campaign workspace</p>
@@ -753,8 +884,8 @@ Please let me know a suitable time to connect.`,
                     {filteredCampaigns.map((campaign) => (
                       <button key={campaign.id} className={selectedCampaignSummary?.id === campaign.id ? "campaign-directory-row active" : "campaign-directory-row"} onClick={() => setQueueForm((current) => ({ ...current, campaignId: campaign.id, confirmed: false }))}>
                         <span className="campaign-symbol">{campaign.name.slice(0, 2).toUpperCase()}</span>
-                        <span className="campaign-directory-copy"><strong>{campaign.name}</strong><small>{campaign.total} recipients · Updated {compactDate(campaign.latestGeneratedAt)}</small><i><b style={{ width: `${campaign.progress}%` }} /></i></span>
-                        <span className="campaign-directory-result"><StatusPill value={campaign.lifecycle} /><small>{campaign.progress}% delivered or scheduled</small></span>
+                        <span className="campaign-directory-copy"><strong>{campaign.name}</strong><small>{campaign.researchJob && ["queued", "researching"].includes(campaign.researchJob.status) ? `${campaign.researchJob.completedItems} of ${campaign.researchJob.totalItems} sources researched` : `${campaign.total} recipients · Updated ${compactDate(campaign.latestGeneratedAt)}`}</small><i><b style={{ width: `${campaign.researchProgress ?? campaign.progress}%` }} /></i></span>
+                        <span className="campaign-directory-result"><StatusPill value={campaign.lifecycle} /><small>{campaign.researchProgress !== null && ["queued", "researching"].includes(campaign.lifecycle) ? `${campaign.researchProgress}% research complete` : `${campaign.progress}% delivered or scheduled`}</small></span>
                         <span className="campaign-row-arrow">→</span>
                       </button>
                     ))}
@@ -771,8 +902,8 @@ Please let me know a suitable time to connect.`,
                     </div>
 
                     <div className="campaign-detail-progress">
-                      <div><span>Campaign progress</span><strong>{selectedCampaignSummary.progress}%</strong></div>
-                      <i><b style={{ width: `${selectedCampaignSummary.progress}%` }} /></i>
+                      <div><span>{selectedCampaignSummary.researchProgress !== null && ["queued", "researching"].includes(selectedCampaignSummary.lifecycle) ? "Research progress" : "Campaign progress"}</span><strong>{selectedCampaignSummary.researchProgress ?? selectedCampaignSummary.progress}%</strong></div>
+                      <i><b style={{ width: `${selectedCampaignSummary.researchProgress ?? selectedCampaignSummary.progress}%` }} /></i>
                     </div>
 
                     <div className="campaign-detail-stats">
@@ -876,13 +1007,25 @@ Please let me know a suitable time to connect.`,
                         <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span></div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
                       </section>
                       <section className="campaign-schedule-section">
-                        <div className="campaign-step-heading"><span>3</span><div><strong>Schedule automatic delivery</strong><p>Brevo stores the campaign schedule and continues when this dashboard is closed.</p></div></div>
-                        <div className="campaign-schedule-form">
-                          <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
-                          <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
-                          <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
-                          <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
+                        <div className="campaign-step-heading"><span>3</span><div><strong>Choose campaign delivery</strong><p>Sending identity: {selectedCampaign.senderName} &lt;{selectedCampaign.senderEmail}&gt;. Choose immediate or scheduled Brevo delivery.</p></div></div>
+                        <div className="campaign-delivery-choice" role="tablist" aria-label="Campaign delivery choice">
+                          <button className={campaignDeliveryChoice === "schedule" ? "active" : ""} onClick={() => setCampaignDeliveryChoice("schedule")}>Schedule campaign</button>
+                          <button className={campaignDeliveryChoice === "send" ? "active" : ""} onClick={() => setCampaignDeliveryChoice("send")}>Send campaign now</button>
                         </div>
+                        {campaignDeliveryChoice === "schedule" ? (
+                          <div className="campaign-schedule-form">
+                            <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
+                            <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
+                            <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
+                            <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
+                          </div>
+                        ) : (
+                          <div className="campaign-send-now-form">
+                            <div><strong>Immediate delivery cannot be undone</strong><p>All {selectedCampaignApproved} approved, unsent emails in this campaign will be submitted to Brevo now. The daily limit and global Pause all control still apply.</p></div>
+                            <label><span>Type SEND CAMPAIGN to confirm</span><input value={campaignSendConfirm} onChange={(event) => setCampaignSendConfirm(event.target.value.toUpperCase())} placeholder="SEND CAMPAIGN" /></label>
+                            <button className="danger-action" disabled={working || paused || !control?.canManage || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0 || campaignSendConfirm !== "SEND CAMPAIGN"} onClick={sendSelectedCampaignNow}>{working ? "Submitting campaign…" : `Send ${selectedCampaignApproved} approved emails now`}</button>
+                          </div>
+                        )}
                       </section>
                     </div>
                   </article>
@@ -958,7 +1101,7 @@ Please let me know a suitable time to connect.`,
                   <div><p className="eyebrow">Research · enrich · personalize</p><h2>Outreach Intelligence Studio</h2><p>Bring whatever you have. The studio extracts contacts, researches company websites, discovers public email addresses, and creates review-ready drafts.</p></div>
                   <div className="studio-steps"><span>1 · Add sources</span><span>2 · Research</span><span>3 · Review drafts</span></div>
                 </div>
-                <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio(); }}>
+                <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
                   <div className="campaign-setup-grid">
                     <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
                     <label className="topic-field"><span>Email topic</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI-enabled manufacturing operations" /><small>Used to build each personalized subject line.</small></label>
@@ -969,18 +1112,49 @@ Please let me know a suitable time to connect.`,
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
                       <textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
                     </label>
-                    <label className="source-card">
-                      <span className="source-icon">www</span><strong>Add company websites</strong><small>We inspect public home, about, and contact pages.</small>
-                      <textarea rows={8} value={intakeForm.websites} onChange={(event) => setIntakeForm({ ...intakeForm, websites: event.target.value })} placeholder={"https://company.com\nhttps://association.org/contact"} />
-                    </label>
+                    <div className="source-card website-source-card">
+                      <span className="source-icon">www</span><strong>Add company websites</strong><small>Enter up to 50 websites. They are queued and researched in parallel batches, even after this tab is closed.</small>
+                      <textarea id="website-sources" aria-label="Company websites" rows={8} value={intakeForm.websites} onChange={(event) => { setIntakeForm({ ...intakeForm, websites: event.target.value }); setWebsiteScans([]); }} placeholder={"www.company.com\nhttps://association.org/contact-us/\nexample.in"} />
+                      <button type="button" className="website-scan-button" disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>{scanningWebsites ? "Scanning websites…" : "Find public email addresses"}</button>
+                    </div>
                     <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
                       <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB</small>
                       <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
                       <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
                     </label>
                   </div>
+                  {websiteScans.length > 0 && (
+                    <section className="website-scan-results" aria-live="polite">
+                      <div><span><strong>Website scan results</strong><small>{websiteScans.length} website{websiteScans.length === 1 ? "" : "s"} checked independently</small></span><button type="button" onClick={() => setWebsiteScans([])}>Clear results</button></div>
+                      <div className="website-scan-grid">
+                        {websiteScans.map((scan) => (
+                          <article className={scan.ok ? "website-scan-card" : "website-scan-card failed"} key={scan.input}>
+                            <span className="scan-state">{scan.ok ? "✓" : "!"}</span>
+                            <div>
+                              <strong>{scan.companyName || scan.input}</strong>
+                              <small>{scan.ok ? `${scan.pagesReviewed.length} public page${scan.pagesReviewed.length === 1 ? "" : "s"} scanned` : scan.error}</small>
+                              {scan.discoveredEmails.length ? <div className="email-chip-list">{scan.discoveredEmails.map((email) => <span key={email}>{email}</span>)}</div> : scan.ok && <p>No public email address found on the scanned pages.</p>}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                   <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
-                  <div className="studio-actions"><div><strong>Campaign draft workflow</strong><span>Drafts stay grouped under “{intakeForm.campaignName || "Untitled campaign"}”. Nothing is approved, scheduled, or sent automatically.</span></div><button className="primary-action" disabled={working || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Researching websites…" : "Create campaign drafts"}</button></div>
+                  <section className="campaign-creation-actions">
+                    <label className="campaign-sender-field">
+                      <span>Verified Brevo sender</span>
+                      <select value={intakeForm.senderEmail} onChange={(event) => setIntakeForm({ ...intakeForm, senderEmail: event.target.value })}>
+                        {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
+                      </select>
+                      <small>This sender is stored on the campaign and used in the email signature and Brevo delivery.</small>
+                    </label>
+                    <div className="campaign-paths">
+                      <div><strong>Choose what happens next</strong><span>Research runs in the background. Sending always remains behind review, approval, and confirmation.</span></div>
+                      <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
+                      <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>Continue to campaign setup</button>
+                    </div>
+                  </section>
                 </form>
               </article>
 

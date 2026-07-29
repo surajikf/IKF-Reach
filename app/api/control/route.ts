@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getQueueDb } from "../../../db";
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +53,18 @@ type WebsiteResearch = {
   pagesReviewed: string[];
 };
 
-function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null; template?: string }) {
+type WebsiteScanResult = {
+  input: string;
+  ok: boolean;
+  website?: string;
+  companyName?: string;
+  discoveredEmails: string[];
+  pagesReviewed: string[];
+  error?: string;
+  research?: WebsiteResearch;
+};
+
+function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null; template?: string; senderName?: string }) {
   const name = greetingName(input.email, input.name);
   const researchedContext = input.research?.summary || input.research?.description || "";
   const context = input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`;
@@ -75,16 +87,17 @@ Please let me know a suitable time to connect.`;
     body += `<p>Alternatively, you are welcome to join our <strong>AI Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p>`;
   }
   if (!/I Knowledge Factory Pvt\. Ltd\./i.test(body)) {
-    body += `<p>Regards,<br><strong>Tanishka</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
+    body += `<p>Regards,<br><strong>${escapeHtml(input.senderName || sender.name)}</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
   }
   return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5">${body}</div>`;
 }
 
 export async function GET(req: NextRequest) {
   try {
-    const [queue, jobs, settings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
+    const [queue, researchAudit, backgroundJobs, settings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
       db("outreach_queue?select=*&order=created_at.desc&limit=1000"),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
+      listBackgroundJobs(),
       db("outreach_settings?select=*&key=eq.sending_policy"),
       db("campaigns?select=id,name,status,sender_name,sender_email&order=created_at.desc"),
       db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&order=generated_at.desc&limit=1000"),
@@ -175,17 +188,23 @@ export async function GET(req: NextRequest) {
       failed: sends.filter((item: Record<string, any>) => /fail|not_sent/i.test(String(item.status || ""))).length,
     };
     let brevo = false;
+    let availableSenders: Array<{ name: string; email: string; active: boolean }> = [];
     try {
       const check = await fetch("https://api.brevo.com/v3/account", { headers: { "api-key": process.env.BREVO_API_KEY || "" } });
       brevo = check.ok;
     } catch {}
+    try {
+      availableSenders = await getBrevoSenders();
+    } catch {}
+    if (!availableSenders.length && sender.email) availableSenders = [{ ...sender, active: brevo }];
     return NextResponse.json({
       ok: true,
       canManage: canManage(req),
       operator: actor(req) || null,
       providers: { database: true, brevo },
       queue,
-      jobs,
+      jobs: backgroundJobs,
+      researchAudit,
       settings: settings[0]?.value || {},
       campaigns,
       liveEmails,
@@ -194,6 +213,7 @@ export async function GET(req: NextRequest) {
       liveActivity,
       liveStats,
       sender,
+      availableSenders,
       replyTo: replyTo(),
       refreshedAt: new Date().toISOString(),
       scheduling: { provider: "Brevo", timezone: "Asia/Kolkata", maximumHoursAhead: 72 },
@@ -205,14 +225,77 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    if (!canManage(req)) {
+    const body = await req.json();
+    const internalWorker = body.action === "process_background_campaign" &&
+      Boolean(process.env.SUPABASE_SECRET_KEY) &&
+      req.headers.get("x-ikf-background-token") === process.env.SUPABASE_SECRET_KEY;
+    if (!canManage(req) && !internalWorker) {
       return NextResponse.json(
         { ok: false, error: "Sign in with an authorized IKF account to manage or send emails." },
         { status: 403 },
       );
     }
-    const body = await req.json();
-    const user = actor(req);
+    const user = internalWorker ? "background-campaign-worker" : actor(req);
+
+    if (body.action === "queue_background_campaign") {
+      const topic = String(body.topic || "").trim();
+      const campaignName = cleanCampaignName(body.campaignName);
+      const emailTemplate = String(body.emailTemplate || "").trim();
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
+      if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
+      if (!emailTemplate) return NextResponse.json({ ok: false, error: "Paste the email template to personalize for this campaign." }, { status: 400 });
+      if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
+
+      const documentText = body.document ? await extractDocumentText(body.document) : "";
+      const parsedContacts = parseContactInput(`${String(body.rawInput || "")}\n${documentText}`.trim());
+      const suppliedWebsites = extractWebsites(String(body.websites || ""));
+      if (!parsedContacts.length && !suppliedWebsites.length) {
+        return NextResponse.json({ ok: false, error: "Paste contacts, enter company websites, or upload a supported document." }, { status: 400 });
+      }
+      if (suppliedWebsites.length > 50) {
+        return NextResponse.json({ ok: false, error: "Add up to 50 company websites to one campaign." }, { status: 400 });
+      }
+      if (parsedContacts.length > 50) {
+        return NextResponse.json({ ok: false, error: "Add up to 50 known contacts to one campaign." }, { status: 400 });
+      }
+
+      const selectedSender = await selectVerifiedSender(body.senderEmail);
+      const campaign = await ensureCampaign(campaignName, "researching", selectedSender);
+      const job = await queueBackgroundCampaign({
+        campaignId: campaign.id,
+        campaignName,
+        topic,
+        emailTemplate,
+        brief: String(body.brief || ""),
+        user,
+        websites: suppliedWebsites,
+        contacts: parsedContacts,
+      });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "background_campaign_queued",
+          details: {
+            campaign_id: campaign.id,
+            campaign_name: campaignName,
+            job_id: job.id,
+            websites: suppliedWebsites.length,
+            known_contacts: parsedContacts.length,
+            queued_by: user,
+          },
+        }),
+      });
+      return NextResponse.json({ ok: true, queued: true, job, campaign }, { status: 202 });
+    }
+
+    if (body.action === "process_background_campaign") {
+      const jobId = String(body.jobId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+        return NextResponse.json({ ok: false, error: "A valid background campaign job is required." }, { status: 400 });
+      }
+      const progress = await processBackgroundCampaignBatch(jobId);
+      return NextResponse.json({ ok: true, ...progress });
+    }
 
     if (body.action === "create_draft") {
       const result = await createDraftRecord({
@@ -227,6 +310,22 @@ export async function POST(req: NextRequest) {
         source: "single_form",
       }, user);
       return NextResponse.json({ ok: true, draft: result.draft, research: result.research });
+    }
+
+    if (body.action === "discover_website_contacts") {
+      const suppliedWebsites = extractWebsites(String(body.websites || ""));
+      if (!suppliedWebsites.length) {
+        return NextResponse.json({ ok: false, error: "Enter at least one public company website." }, { status: 400 });
+      }
+      if (suppliedWebsites.length > 50) {
+        return NextResponse.json({ ok: false, error: "Scan up to 50 company websites at a time." }, { status: 400 });
+      }
+      const websiteScans = await researchWebsites(suppliedWebsites);
+      return NextResponse.json({
+        ok: true,
+        websites: websiteScans,
+        found: websiteScans.reduce((total, item) => total + item.discoveredEmails.length, 0),
+      });
     }
 
     if (body.action === "research_batch") {
@@ -244,18 +343,30 @@ export async function POST(req: NextRequest) {
       if (!parsedContacts.length && !suppliedWebsites.length) {
         return NextResponse.json({ ok: false, error: "Paste contacts, enter a website, or upload a supported document." }, { status: 400 });
       }
+      if (suppliedWebsites.length > 10) {
+        return NextResponse.json({ ok: false, error: "Research up to 10 company websites in one campaign batch." }, { status: 400 });
+      }
 
       const contactInputs = [...parsedContacts];
-      for (const website of suppliedWebsites.slice(0, 5)) {
-        const research = await researchWebsite(website);
-        for (const email of research.discoveredEmails.slice(0, 5)) {
+      const websiteScans = await researchWebsites(suppliedWebsites);
+      for (const scan of websiteScans) {
+        if (!scan.ok || !scan.website || !scan.companyName || !scan.research) continue;
+        const research = scan.research;
+        for (const email of research.discoveredEmails.slice(0, 10)) {
           if (!contactInputs.some((item) => item.email === email)) {
             contactInputs.push({ email, name: "", website: research.website, company: research.companyName, research });
           }
         }
       }
       if (!contactInputs.length) {
-        return NextResponse.json({ ok: false, error: "No email addresses were found. Try a contact/about page or paste at least one email." }, { status: 400 });
+        return NextResponse.json({
+          ok: true,
+          created: 0,
+          failed: 0,
+          results: [],
+          websiteScans,
+          warning: "The websites were scanned, but no public email addresses were found. Try a direct contact page or paste a known email.",
+        });
       }
       if (contactInputs.length > 25) {
         return NextResponse.json({ ok: false, error: "Process up to 25 contacts at a time so each website can be researched carefully." }, { status: 400 });
@@ -277,7 +388,7 @@ export async function POST(req: NextRequest) {
           results.push({ ok: false, email: input.email, error: error instanceof Error ? error.message : "Research failed" });
         }
       }
-      return NextResponse.json({ ok: true, created: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results });
+      return NextResponse.json({ ok: true, created: results.filter((item) => item.ok).length, failed: results.filter((item) => !item.ok).length, results, websiteScans });
     }
 
     if (body.action === "update_contact") {
@@ -390,9 +501,10 @@ export async function POST(req: NextRequest) {
       }
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
+      const usedSender = await senderForMail(mail);
       const result = await submitBrevo(mail, contact, scheduledAt.toISOString());
       const rows = await db("outreach_queue", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, status: "scheduled_with_brevo", scheduled_for: scheduledAt.toISOString(), approved_by: user, approved_at: new Date().toISOString() }) });
-      await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: sender.name, sender_email: sender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: `scheduled:${scheduledAt.toISOString()}` }) });
+      await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: `scheduled:${scheduledAt.toISOString()}` }) });
       await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "scheduled" }) });
       return NextResponse.json({ ok: true, queue: rows[0], messageId: result.messageId });
     }
@@ -446,6 +558,7 @@ export async function POST(req: NextRequest) {
           throw new Error("The spacing pushes part of this batch beyond Brevo’s 72-hour scheduling limit.");
         }
         const result = await submitBrevo(mail, contact, scheduledAt);
+        const usedSender = await senderForMail(mail);
         const queueId = crypto.randomUUID();
         await db("outreach_queue", {
           method: "POST",
@@ -468,8 +581,8 @@ export async function POST(req: NextRequest) {
             company_id: mail.company_id,
             contact_id: mail.contact_id,
             campaign_id: mail.campaign_id,
-            sender_name: sender.name,
-            sender_email: sender.email,
+            sender_name: usedSender.name,
+            sender_email: usedSender.email,
             recipient_email: contact.email,
             subject: mail.subject,
             brevo_message_id: result.messageId,
@@ -560,18 +673,21 @@ export async function POST(req: NextRequest) {
         });
         await db("email_sends", {
           method: "POST",
-          body: JSON.stringify(successful.map((item) => ({
+          body: JSON.stringify(await Promise.all(successful.map(async (item) => {
+            const usedSender = await senderForMail(item.mail);
+            return {
             id: crypto.randomUUID(),
             generated_email_id: item.mail.id,
             company_id: item.mail.company_id,
             contact_id: item.mail.contact_id,
             campaign_id: campaignId,
-            sender_name: sender.name,
-            sender_email: sender.email,
+            sender_name: usedSender.name,
+            sender_email: usedSender.email,
             recipient_email: item.contact.email,
             subject: item.mail.subject,
             brevo_message_id: item.messageId,
             status: `scheduled:${item.scheduledAt}`,
+            };
           }))),
         });
         for (const ids of chunk(successful.map((item) => item.mail.id), 100)) {
@@ -619,8 +735,9 @@ export async function POST(req: NextRequest) {
       const contacts = await db(`contacts?select=*&id=eq.${mail.contact_id}&limit=1`);
       const contact = contacts[0];
       if (!contact?.email) return NextResponse.json({ ok: false, error: "The selected draft has no valid recipient." }, { status: 400 });
+      const usedSender = await senderForMail(mail);
       const result = await submitBrevo(mail, contact);
-      await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: sender.name, sender_email: sender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
+      await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
       await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
       return NextResponse.json({ ok: true, messageId: result.messageId });
     }
@@ -687,12 +804,54 @@ export async function POST(req: NextRequest) {
       for (const mail of mails) {
         const contact = contactById.get(mail.contact_id);
         if (!contact?.email) continue;
+        const usedSender = await senderForMail(mail);
         const result = await submitBrevo(mail, contact);
-        await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: sender.name, sender_email: sender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
+        await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
         await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
         sent.push(mail.id);
       }
       return NextResponse.json({ ok: true, count: sent.length });
+    }
+
+    if (body.action === "send_campaign") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
+      if (body.confirmText !== "SEND CAMPAIGN") return NextResponse.json({ ok: false, error: "Type SEND CAMPAIGN to confirm immediate delivery." }, { status: 400 });
+      const [settingsRows, campaignRows, mails] = await Promise.all([
+        db("outreach_settings?select=*&key=eq.sending_policy"),
+        db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
+        db(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc&limit=1000`),
+      ]);
+      const policy = settingsRows[0]?.value || {};
+      if (policy.paused) return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” before sending this campaign." }, { status: 409 });
+      if (!campaignRows[0]) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
+      if (!mails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unsent emails." }, { status: 400 });
+      const dailyLimit = Math.max(1, Math.min(1000, Number(policy.daily_limit || 25)));
+      if (mails.length > dailyLimit) {
+        return NextResponse.json({ ok: false, error: `This campaign has ${mails.length} approved emails, above the ${dailyLimit}-email daily limit. Schedule it instead or reduce the audience.` }, { status: 400 });
+      }
+      const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
+      const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
+      const sent: string[] = [];
+      const failures: Array<{ id: string; error: string }> = [];
+      for (const mail of mails) {
+        const contact = contactById.get(mail.contact_id);
+        if (!contact?.email) {
+          failures.push({ id: mail.id, error: "Recipient email is missing." });
+          continue;
+        }
+        try {
+          const usedSender = await senderForMail(mail);
+          const result = await submitBrevo(mail, contact);
+          await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
+          await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
+          sent.push(mail.id);
+        } catch (error) {
+          failures.push({ id: mail.id, error: error instanceof Error ? error.message : "Brevo rejected this email." });
+        }
+      }
+      return NextResponse.json({ ok: true, sent: sent.length, failed: failures.length, failures });
     }
 
     if (body.action === "cancel_scheduled") {
@@ -720,6 +879,333 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Action failed" }, { status: 500 });
   }
+}
+
+async function listBackgroundJobs() {
+  try {
+    const result = await getQueueDb().prepare(`
+      SELECT
+        id,
+        campaign_id AS campaignId,
+        campaign_name AS campaignName,
+        status,
+        total_items AS totalItems,
+        completed_items AS completedItems,
+        successful_items AS successfulItems,
+        failed_items AS failedItems,
+        drafts_created AS draftsCreated,
+        contacts_found AS contactsFound,
+        last_error AS lastError,
+        created_at AS createdAt,
+        started_at AS startedAt,
+        completed_at AS completedAt,
+        updated_at AS updatedAt
+      FROM background_research_jobs
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).all();
+    return result.results || [];
+  } catch {
+    return [];
+  }
+}
+
+async function getBrevoSenders() {
+  const response = await fetch("https://api.brevo.com/v3/senders", {
+    headers: { "api-key": process.env.BREVO_API_KEY || "" },
+  });
+  if (!response.ok) throw new Error("Brevo senders could not be loaded.");
+  const data = await response.json() as { senders?: Array<Record<string, any>> };
+  return (data.senders || [])
+    .filter((item) => item.active !== false && item.email)
+    .map((item) => ({
+      name: cleanText(item.name, 120) || String(item.email).split("@")[0],
+      email: String(item.email).trim().toLowerCase(),
+      active: item.active !== false,
+    }));
+}
+
+async function selectVerifiedSender(value: unknown) {
+  const requested = String(value || sender.email).trim().toLowerCase();
+  const senders = await getBrevoSenders();
+  const selected = senders.find((item) => item.email === requested);
+  if (!selected) throw new Error("Choose an active sender that is verified in Brevo.");
+  return selected;
+}
+
+async function ensureCampaign(campaignName: string, status = "paused_user_hold", campaignSender?: { name: string; email: string }) {
+  let campaigns = await db(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
+  if (!campaigns.length) {
+    campaigns = await db("campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        id: crypto.randomUUID(),
+        name: campaignName,
+        status,
+        sender_name: campaignSender?.name || sender.name,
+        sender_email: campaignSender?.email || sender.email,
+      }),
+    });
+  } else if (
+    (status && campaigns[0].status !== status) ||
+    (campaignSender && (campaigns[0].sender_email !== campaignSender.email || campaigns[0].sender_name !== campaignSender.name))
+  ) {
+    const updated = await db(`campaigns?id=eq.${campaigns[0].id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...(status ? { status } : {}),
+        ...(campaignSender ? { sender_name: campaignSender.name, sender_email: campaignSender.email } : {}),
+      }),
+    });
+    campaigns = updated.length ? updated : campaigns;
+  }
+  if (!campaigns[0]) throw new Error("The campaign could not be created.");
+  return campaigns[0];
+}
+
+async function queueBackgroundCampaign(input: {
+  campaignId: string;
+  campaignName: string;
+  topic: string;
+  emailTemplate: string;
+  brief: string;
+  user: string;
+  websites: string[];
+  contacts: Array<Record<string, any>>;
+}) {
+  const queueDb = getQueueDb();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const items = [
+    ...input.websites.map((website) => ({
+      id: crypto.randomUUID(),
+      type: "website",
+      value: website,
+      payload: JSON.stringify({ website }),
+    })),
+    ...input.contacts.map((contact) => ({
+      id: crypto.randomUUID(),
+      type: "contact",
+      value: String(contact.email || "").toLowerCase(),
+      payload: JSON.stringify(contact),
+    })),
+  ];
+  await queueDb.batch([
+    queueDb.prepare(`
+      INSERT INTO background_research_jobs (
+        id, campaign_id, campaign_name, topic, email_template, brief, created_by,
+        status, total_items, completed_items, successful_items, failed_items,
+        drafts_created, contacts_found, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, ?, ?)
+    `).bind(id, input.campaignId, input.campaignName, input.topic, input.emailTemplate, input.brief || null, input.user, items.length, now, now),
+    ...items.map((item) => queueDb.prepare(`
+      INSERT INTO background_research_items (
+        id, job_id, input_type, input_value, payload, status, attempts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+    `).bind(item.id, id, item.type, item.value, item.payload, now, now)),
+  ]);
+  return {
+    id,
+    campaignId: input.campaignId,
+    campaignName: input.campaignName,
+    status: "queued",
+    totalItems: items.length,
+    completedItems: 0,
+    websiteCount: input.websites.length,
+    knownContactCount: input.contacts.length,
+    createdAt: now,
+  };
+}
+
+async function processBackgroundCampaignBatch(jobId: string) {
+  const queueDb = getQueueDb();
+  const jobResult = await queueDb.prepare("SELECT * FROM background_research_jobs WHERE id = ? LIMIT 1").bind(jobId).all();
+  const job = jobResult.results?.[0] as Record<string, any> | undefined;
+  if (!job) throw new Error("Background campaign job not found.");
+  if (["completed", "completed_with_issues", "failed"].includes(String(job.status))) {
+    return { jobId, status: job.status, remaining: 0, completedItems: Number(job.completed_items || 0), totalItems: Number(job.total_items || 0) };
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const staleBefore = new Date(now.getTime() - 5 * 60_000).toISOString();
+  await queueDb.prepare(`
+    UPDATE background_research_items
+    SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'queued' END,
+        error = CASE WHEN attempts >= 3 THEN COALESCE(error, 'The research worker could not finish this item after three attempts.') ELSE error END,
+        claimed_by = NULL,
+        updated_at = ?
+    WHERE job_id = ? AND status = 'researching' AND updated_at < ?
+  `).bind(nowIso, jobId, staleBefore).run();
+
+  const queued = await queueDb.prepare(`
+    SELECT * FROM background_research_items
+    WHERE job_id = ? AND status = 'queued'
+    ORDER BY created_at ASC
+    LIMIT 3
+  `).bind(jobId).all();
+  const claimId = crypto.randomUUID();
+  const candidates = (queued.results || []) as Array<Record<string, any>>;
+  if (candidates.length) {
+    await queueDb.batch(candidates.map((item) => queueDb.prepare(`
+      UPDATE background_research_items
+      SET status = 'researching', attempts = attempts + 1, claimed_by = ?, updated_at = ?
+      WHERE id = ? AND status = 'queued'
+    `).bind(claimId, nowIso, item.id)));
+  }
+  const claimedResult = await queueDb.prepare(`
+    SELECT * FROM background_research_items
+    WHERE job_id = ? AND claimed_by = ? AND status = 'researching'
+  `).bind(jobId, claimId).all();
+  const claimed = (claimedResult.results || []) as Array<Record<string, any>>;
+
+  await queueDb.prepare(`
+    UPDATE background_research_jobs
+    SET status = 'researching', started_at = COALESCE(started_at, ?), updated_at = ?
+    WHERE id = ?
+  `).bind(nowIso, nowIso, jobId).run();
+
+  const outcomes = await Promise.all(claimed.map(async (item) => {
+    try {
+      const result = await processBackgroundResearchItem(item, job);
+      return { item, ok: true, result };
+    } catch (error) {
+      return { item, ok: false, error: error instanceof Error ? error.message : "Research failed." };
+    }
+  }));
+  if (outcomes.length) {
+    await queueDb.batch(outcomes.map((outcome) => queueDb.prepare(`
+      UPDATE background_research_items
+      SET status = ?, result = ?, error = ?, claimed_by = NULL, updated_at = ?
+      WHERE id = ?
+    `).bind(
+      outcome.ok ? "completed" : "failed",
+      outcome.ok ? JSON.stringify(outcome.result) : null,
+      outcome.ok ? null : outcome.error,
+      new Date().toISOString(),
+      outcome.item.id,
+    )));
+  }
+
+  const addedDrafts = outcomes.reduce((total, outcome) => total + (outcome.ok ? Number(outcome.result.draftsCreated || 0) : 0), 0);
+  const addedContacts = outcomes.reduce((total, outcome) => total + (outcome.ok ? Number(outcome.result.contactsFound || 0) : 0), 0);
+  const countsResult = await queueDb.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status IN ('completed', 'failed') THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS successful,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status IN ('queued', 'researching') THEN 1 ELSE 0 END) AS remaining
+    FROM background_research_items
+    WHERE job_id = ?
+  `).bind(jobId).all();
+  const counts = (countsResult.results?.[0] || {}) as Record<string, any>;
+  const remaining = Number(counts.remaining || 0);
+  const completedItems = Number(counts.completed || 0);
+  const successfulItems = Number(counts.successful || 0);
+  const failedItems = Number(counts.failed || 0);
+  const currentDrafts = Number(job.drafts_created || 0) + addedDrafts;
+  const currentContacts = Number(job.contacts_found || 0) + addedContacts;
+  const finalStatus = remaining
+    ? "researching"
+    : failedItems && successfulItems
+      ? "completed_with_issues"
+      : failedItems
+        ? "failed"
+        : "completed";
+  const completedAt = remaining ? null : new Date().toISOString();
+  const lastError = outcomes.find((outcome) => !outcome.ok)?.error || null;
+
+  await queueDb.prepare(`
+    UPDATE background_research_jobs
+    SET status = ?, completed_items = ?, successful_items = ?, failed_items = ?,
+        drafts_created = ?, contacts_found = ?, last_error = COALESCE(?, last_error),
+        completed_at = ?, updated_at = ?
+    WHERE id = ?
+  `).bind(finalStatus, completedItems, successfulItems, failedItems, currentDrafts, currentContacts, lastError, completedAt, new Date().toISOString(), jobId).run();
+
+  if (!remaining) {
+    const campaignStatus = currentDrafts ? "draft_pending_review" : failedItems ? "research_failed" : "research_complete_no_contacts";
+    await db(`campaigns?id=eq.${job.campaign_id}`, { method: "PATCH", body: JSON.stringify({ status: campaignStatus }) });
+    await db("activity_log", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "background_campaign_completed",
+        details: {
+          campaign_id: job.campaign_id,
+          campaign_name: job.campaign_name,
+          job_id: jobId,
+          status: finalStatus,
+          drafts_created: currentDrafts,
+          contacts_found: currentContacts,
+          failed_items: failedItems,
+        },
+      }),
+    });
+  }
+  return {
+    jobId,
+    status: finalStatus,
+    remaining,
+    totalItems: Number(counts.total || 0),
+    completedItems,
+    successfulItems,
+    failedItems,
+    draftsCreated: currentDrafts,
+    contactsFound: currentContacts,
+  };
+}
+
+async function processBackgroundResearchItem(item: Record<string, any>, job: Record<string, any>) {
+  const payload = JSON.parse(String(item.payload || "{}"));
+  const common = {
+    topic: job.topic,
+    campaignName: job.campaign_name,
+    emailTemplate: job.email_template,
+    brief: job.brief || "",
+    source: `background_campaign:${job.id}`,
+    skipExistingCampaignContact: true,
+  };
+  if (item.input_type === "contact") {
+    const created = await createDraftRecord({ ...payload, ...common }, String(job.created_by || "background-worker"));
+    return {
+      contactsFound: 1,
+      draftsCreated: created.skipped ? 0 : 1,
+      email: String(payload.email || ""),
+      company: created.company?.name || payload.company || "",
+      skippedExisting: Boolean(created.skipped),
+    };
+  }
+
+  const research = await researchWebsite(String(payload.website || item.input_value));
+  const emails = [...new Set(research.discoveredEmails.map((email) => email.toLowerCase()))].slice(0, 10);
+  const drafts: Array<Record<string, any>> = [];
+  const errors: string[] = [];
+  for (const email of emails) {
+    try {
+      const created = await createDraftRecord({
+        ...common,
+        email,
+        company: research.companyName,
+        website: research.website,
+        research,
+      }, String(job.created_by || "background-worker"));
+      drafts.push({ id: created.draft.id, email, skippedExisting: Boolean(created.skipped) });
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : `Could not create the draft for ${email}.`);
+    }
+  }
+  if (emails.length && !drafts.length && errors.length) throw new Error(errors[0]);
+  return {
+    website: research.website,
+    companyName: research.companyName,
+    contactsFound: emails.length,
+    draftsCreated: drafts.filter((draft) => !draft.skippedExisting).length,
+    discoveredEmails: emails,
+    pagesReviewed: research.pagesReviewed,
+    drafts,
+    errors,
+  };
 }
 
 async function createDraftRecord(input: Record<string, any>, user: string) {
@@ -772,24 +1258,18 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   }
   const contact = contacts[0];
   const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach";
-  let campaigns = await db(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
-  if (!campaigns.length) {
-    campaigns = await db("campaigns", {
-      method: "POST",
-      body: JSON.stringify({
-        id: crypto.randomUUID(),
-        name: campaignName,
-        status: "paused_user_hold",
-        sender_name: sender.name,
-        sender_email: sender.email,
-      }),
-    });
-  }
-  const campaign = campaigns[0];
+  const campaign = await ensureCampaign(campaignName, "");
   if (!campaign) throw new Error("No outreach campaign is configured.");
-  const existing = await db(`generated_emails?select=version&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
+  const existing = await db(`generated_emails?select=*&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
+  if (input.skipExistingCampaignContact && existing[0]) {
+    return { draft: existing[0], company, contact, research, skipped: true };
+  }
   const topic = String(input.topic || "AI Native Thinking Masterclass").trim();
-  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research, template: input.emailTemplate });
+  const campaignSender = {
+    name: String(campaign.sender_name || sender.name),
+    email: String(campaign.sender_email || sender.email),
+  };
+  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research, template: input.emailTemplate, senderName: campaignSender.name });
   const drafts = await db("generated_emails", {
     method: "POST",
     body: JSON.stringify({
@@ -810,8 +1290,8 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
         research_summary: research?.summary || "",
         focus_areas: research?.focusAreas || [],
         website,
-        sender_name: sender.name,
-        sender_email: sender.email,
+        sender_name: campaignSender.name,
+        sender_email: campaignSender.email,
         reply_to_email: replyTo(),
         email_font: "Calibri",
         email_font_size: "11pt",
@@ -821,70 +1301,247 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     }),
   });
   await db("research_jobs", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), email, company: companyName, website, brief: input.brief || null, status: "draft_created", created_by: user, result: { generated_email_id: drafts[0].id, campaign_id: campaign.id, campaign_name: campaignName, research: researchData } }) });
-  return { draft: drafts[0], company, contact, research };
+  return { draft: drafts[0], company, contact, research, skipped: false };
+}
+
+async function researchWebsites(websites: string[]): Promise<WebsiteScanResult[]> {
+  if (!websites.length) return [];
+  const results = new Array<WebsiteScanResult>(websites.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < websites.length) {
+      const index = cursor++;
+      const input = websites[index];
+      try {
+        const research = await researchWebsite(input);
+        results[index] = {
+          input,
+          ok: true,
+          website: research.website,
+          companyName: research.companyName,
+          discoveredEmails: research.discoveredEmails,
+          pagesReviewed: research.pagesReviewed,
+          research,
+        };
+      } catch (error) {
+        results[index] = {
+          input,
+          ok: false,
+          discoveredEmails: [],
+          pagesReviewed: [],
+          error: error instanceof Error ? error.message : "The website could not be scanned.",
+        };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(5, websites.length) }, () => worker()));
+  return results;
 }
 
 async function researchWebsite(rawUrl: string): Promise<WebsiteResearch> {
   const firstUrl = safeWebsiteUrl(rawUrl);
-  const origin = new URL(firstUrl).origin;
+  const pinnedHost = siteHost(new URL(firstUrl).hostname);
   const pages = [firstUrl];
+  const visited = new Set<string>();
   const reviewed: string[] = [];
   const texts: string[] = [];
+  const emailScores = new Map<string, number>();
   let firstHtml = "";
-  for (let index = 0; index < pages.length && index < 3; index += 1) {
-    const url = pages[index];
+  let canonicalWebsite = firstUrl;
+  const deadline = Date.now() + 14_000;
+
+  for (let index = 0; index < pages.length && reviewed.length < 6 && index < 14 && Date.now() < deadline; index += 1) {
+    const requestedUrl = pages[index];
+    const normalizedRequest = stripTrackingUrl(requestedUrl);
+    if (visited.has(normalizedRequest)) continue;
+    visited.add(normalizedRequest);
     try {
-      const response = await fetchWithTimeout(url);
-      if (!response.ok || !String(response.headers.get("content-type") || "").includes("text/html")) continue;
-      const html = (await response.text()).slice(0, 350_000);
+      const response = await fetchWithTimeout(normalizedRequest, pinnedHost);
+      if (!response.ok) continue;
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) continue;
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (contentLength > 2_000_000) continue;
+      const finalUrl = safeWebsiteUrl(response.url || normalizedRequest);
+      if (siteHost(new URL(finalUrl).hostname) !== pinnedHost) continue;
+      const html = (await response.text()).slice(0, 600_000);
+      if (!html.trim()) continue;
+
+      canonicalWebsite = reviewed.length ? canonicalWebsite : finalUrl;
       if (!firstHtml) firstHtml = html;
-      reviewed.push(url);
-      texts.push(htmlToText(html).slice(0, 24_000));
-      if (index === 0) {
-        for (const href of extractUsefulLinks(html, origin)) if (!pages.includes(href)) pages.push(href);
+      reviewed.push(finalUrl);
+      texts.push(htmlToText(html).slice(0, 32_000));
+      for (const candidate of extractEmailsFromHtml(html, finalUrl)) {
+        emailScores.set(candidate.email, Math.max(candidate.score, emailScores.get(candidate.email) || 0));
       }
-    } catch {}
+
+      for (const href of extractUsefulLinks(html, finalUrl, pinnedHost)) {
+        if (!pages.includes(href)) pages.push(href);
+      }
+      if (reviewed.length === 1) {
+        const origin = new URL(finalUrl).origin;
+        for (const path of ["/contact-us/", "/contact/", "/contactus/", "/get-in-touch/", "/about-us/", "/about/", "/team/", "/leadership/", "/staff/", "/support/"]) {
+          const candidate = new URL(path, origin).toString();
+          if (!pages.includes(candidate)) pages.push(candidate);
+        }
+      }
+    } catch {
+      // One blocked or unavailable page must not stop the rest of the same-site crawl.
+    }
   }
+
   if (!reviewed.length) throw new Error(`The website ${new URL(firstUrl).hostname} could not be read.`);
   const combined = texts.join(" ");
   const title = decodeEntities(firstHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").trim();
   const description = decodeEntities(firstHtml.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']/i)?.[1] || firstHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["']/i)?.[1] || "").trim();
-  const emails = [...new Set(`${firstHtml} ${combined}`.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.map((item) => item.toLowerCase()).filter((item) => !/\.(png|jpg|jpeg|gif|svg|webp)$/i.test(item)) || [])];
-  const companyName = cleanCompanyTitle(title) || companyFromDomain(new URL(firstUrl).hostname);
+  const companyName = cleanCompanyTitle(title) || companyFromDomain(new URL(canonicalWebsite).hostname);
   const focusAreas = detectFocusAreas(`${title} ${description} ${combined}`);
   const summary = (description || meaningfulExcerpt(combined, companyName)).slice(0, 420);
-  return { website: firstUrl, companyName, title, description, summary, focusAreas, discoveredEmails: emails.slice(0, 20), pagesReviewed: reviewed };
+  const discoveredEmails = [...emailScores.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([email]) => email)
+    .slice(0, 25);
+  return { website: canonicalWebsite, companyName, title, description, summary, focusAreas, discoveredEmails, pagesReviewed: reviewed };
 }
 
-async function fetchWithTimeout(url: string) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 7000);
-  try {
-    return await fetch(url, { redirect: "follow", signal: controller.signal, headers: { "User-Agent": "IKF-Outreach-Research/1.0 (+https://www.ikf.co.in)" } });
-  } finally {
-    clearTimeout(timer);
+async function fetchWithTimeout(url: string, expectedSiteHost: string) {
+  let current = safeWebsiteUrl(url);
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const response = await fetch(current, {
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "IKF-Outreach-Research/2.0 (+https://www.ikf.co.in)",
+          Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+        },
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location) return response;
+        const next = safeWebsiteUrl(new URL(location, current).toString());
+        if (siteHost(new URL(next).hostname) !== expectedSiteHost) throw new Error("The website redirected outside its own domain.");
+        current = next;
+        continue;
+      }
+      return response;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw new Error("The website redirected too many times.");
 }
 
 function safeWebsiteUrl(value: string) {
-  const withProtocol = /^https?:\/\//i.test(value.trim()) ? value.trim() : `https://${value.trim()}`;
+  const trimmed = String(value || "").trim().replace(/^[<([{]+|[>\])},.;]+$/g, "");
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   const url = new URL(withProtocol);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only public HTTP or HTTPS websites can be researched.");
-  const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local") || /^127\.|^10\.|^192\.168\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\./.test(host)) throw new Error("Private network addresses cannot be researched.");
+  if (url.username || url.password) throw new Error("Website URLs cannot contain sign-in credentials.");
+  if (url.port && !["80", "443"].includes(url.port)) throw new Error("Only standard public website ports can be researched.");
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!host || host.includes(":") || isBlockedIpv4(host) || host === "localhost" || /\.(?:local|internal|lan|home|test|example|invalid|onion)$/i.test(host)) {
+    throw new Error("Private or internal network addresses cannot be researched.");
+  }
+  url.hostname = host;
   url.hash = "";
   return url.toString();
 }
 
-function extractUsefulLinks(html: string, origin: string) {
-  const links: string[] = [];
-  for (const match of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
+function isBlockedIpv4(host: string) {
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  const octets = host.split(".").map(Number);
+  if (octets.some((value) => value < 0 || value > 255)) return true;
+  const [a, b] = octets;
+  return a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19));
+}
+
+function siteHost(hostname: string) {
+  return hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
+}
+
+function stripTrackingUrl(value: string) {
+  const url = new URL(value);
+  for (const key of [...url.searchParams.keys()]) {
+    if (/^(utm_|fbclid|gclid|mc_)/i.test(key)) url.searchParams.delete(key);
+  }
+  url.hash = "";
+  return url.toString();
+}
+
+function extractUsefulLinks(html: string, baseUrl: string, expectedSiteHost: string) {
+  const scored = new Map<string, number>();
+  for (const match of html.matchAll(/href\s*=\s*["']([^"'#]+)["']/gi)) {
+    const raw = decodeEntities(match[1]).trim();
+    if (!raw || /^(?:mailto|tel|javascript|data):/i.test(raw)) continue;
     try {
-      const url = new URL(match[1], origin);
-      if (url.origin === origin && /\/(about|contact|company|who-we-are)(\/|$)/i.test(url.pathname)) links.push(url.toString());
+      const url = new URL(raw, baseUrl);
+      if (!["http:", "https:"].includes(url.protocol) || siteHost(url.hostname) !== expectedSiteHost) continue;
+      if (/\.(?:pdf|docx?|xlsx?|zip|jpe?g|png|gif|svg|webp|mp4|mp3)(?:$|\?)/i.test(url.pathname)) continue;
+      const searchable = `${url.pathname} ${url.search}`.toLowerCase();
+      let score = 0;
+      if (/contact|contact-us|contactus|get-in-touch|reach-us|connect/.test(searchable)) score = 100;
+      else if (/team|leadership|staff|people|management|directory/.test(searchable)) score = 80;
+      else if (/about|who-we-are|company|profile/.test(searchable)) score = 60;
+      else if (/support|help|customer-care|locations?|offices?/.test(searchable)) score = 45;
+      else if (/privacy|terms|legal|imprint/.test(searchable)) score = 25;
+      if (!score) continue;
+      const normalized = stripTrackingUrl(url.toString());
+      scored.set(normalized, Math.max(score, scored.get(normalized) || 0));
     } catch {}
   }
-  return [...new Set(links)].slice(0, 2);
+  return [...scored.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([url]) => url)
+    .slice(0, 10);
+}
+
+function extractEmailsFromHtml(html: string, pageUrl: string) {
+  const candidates = new Map<string, number>();
+  const pageHost = siteHost(new URL(pageUrl).hostname);
+  const add = (value: string, score: number) => {
+    let decoded = value;
+    try { decoded = decodeURIComponent(value); } catch {}
+    const email = decoded.replace(/^mailto:/i, "").split(/[?#,;]/)[0].trim().replace(/^[("'[<{]+|[)"'\]}>.,:;]+$/g, "").toLowerCase();
+    if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\.[a-z]{2,24}$/i.test(email)) return;
+    if (/\.(?:png|jpe?g|gif|svg|webp|css|js|woff2?)$/i.test(email) || /^(?:example|test|email)\.(?:com|org|net)$/i.test(email.split("@")[1])) return;
+    const local = email.split("@")[0];
+    if (/^u[0-9a-f]{4}/i.test(local)) return;
+    if (/^(?:no-?reply|donotreply|mailer-daemon)$/i.test(local)) return;
+    const domainScore = siteHost(email.split("@")[1]) === pageHost ? 35 : 0;
+    candidates.set(email, Math.max(score + domainScore, candidates.get(email) || 0));
+  };
+
+  const decoded = decodeEntities(html);
+  for (const match of decoded.matchAll(/mailto:([^"'<>\\\s]+)/gi)) add(match[1], 70);
+  for (const match of decoded.matchAll(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,24}/gi)) add(match[0], 35);
+  const plain = htmlToText(decoded);
+  for (const match of plain.matchAll(/([A-Z0-9._%+-]+)\s*(?:\[at\]|\(at\)|\sat\s)\s*([A-Z0-9.-]+)\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*([A-Z]{2,24})/gi)) {
+    add(`${match[1]}@${match[2]}.${match[3]}`, 45);
+  }
+  for (const match of html.matchAll(/data-cfemail=["']([0-9a-f]{6,})["']/gi)) {
+    const decodedEmail = decodeCloudflareEmail(match[1]);
+    if (decodedEmail) add(decodedEmail, 60);
+  }
+  return [...candidates.entries()].map(([email, score]) => ({ email, score }));
+}
+
+function decodeCloudflareEmail(hex: string) {
+  try {
+    const key = Number.parseInt(hex.slice(0, 2), 16);
+    let value = "";
+    for (let index = 2; index < hex.length; index += 2) value += String.fromCharCode(Number.parseInt(hex.slice(index, index + 2), 16) ^ key);
+    return value;
+  } catch {
+    return "";
+  }
 }
 
 function htmlToText(html: string) {
@@ -944,8 +1601,16 @@ function parseContactInput(text: string) {
 }
 
 function extractWebsites(text: string) {
-  const matches = text.match(/(?:https?:\/\/|www\.)[^\s,;<>]+/gi) || [];
-  return [...new Set(matches.map((item) => item.replace(/[).]+$/, "")).map((item) => item.startsWith("www.") ? `https://${item}` : item))];
+  const websites: string[] = [];
+  const matches = String(text || "").match(/(?:https?:\/\/|www\.)[^\s,;<>"']+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:\/[^\s,;<>"']*)?/gi) || [];
+  for (const match of matches) {
+    if (match.includes("@")) continue;
+    try {
+      const website = stripTrackingUrl(safeWebsiteUrl(match));
+      if (!websites.includes(website)) websites.push(website);
+    } catch {}
+  }
+  return websites;
 }
 
 function cleanCampaignName(value: unknown) {
@@ -1132,11 +1797,12 @@ function insideIndiaWindow(date: Date, start: string, end: string) {
 
 async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string) {
   const htmlContent = cleanupUnresolvedHtml(mail.html_body);
+  const campaignSender = await senderForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
     body: JSON.stringify({
-      sender,
+      sender: campaignSender,
       replyTo: { email: replyTo() },
       to: [{ email: contact.email, name: contact.full_name || undefined }],
       subject: mail.subject,
@@ -1153,11 +1819,12 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
 async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string) {
   const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
   const htmlContent = cleanupUnresolvedHtml(mail.html_body);
+  const campaignSender = await senderForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
     body: JSON.stringify({
-      sender,
+      sender: campaignSender,
       replyTo: { email: replyTo() },
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
@@ -1168,4 +1835,17 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Brevo rejected the test email.");
   return result;
+}
+
+async function senderForMail(mail: Record<string, any>) {
+  if (mail.campaign_id) {
+    const campaigns = await db(`campaigns?select=sender_name,sender_email&id=eq.${mail.campaign_id}&limit=1`);
+    if (campaigns[0]?.sender_email) {
+      return {
+        name: String(campaigns[0].sender_name || campaigns[0].sender_email.split("@")[0]),
+        email: String(campaigns[0].sender_email).toLowerCase(),
+      };
+    }
+  }
+  return sender;
 }
