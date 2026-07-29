@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb } from "../../../db";
+import { buildCampaignSchedule, insideIndiaWindow } from "../../lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,37 @@ async function db(path: string, init: RequestInit = {}) {
   if (!response.ok) throw new Error(`Database request failed (${response.status})`);
   const text = await response.text();
   return text ? JSON.parse(text) : [];
+}
+
+function normalizedReplyTo(value: unknown, fallback = replyTo()) {
+  const email = String(value || fallback).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Select or enter a valid Reply-To email address.");
+  return email;
+}
+
+function campaignReplyToKey(campaignId: string) {
+  return `campaign_reply_to:${campaignId}`;
+}
+
+async function saveCampaignReplyTo(campaignId: string, email: string, user: string) {
+  const normalized = normalizedReplyTo(email);
+  await db("outreach_settings?on_conflict=key", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify({
+      key: campaignReplyToKey(campaignId),
+      value: { email: normalized },
+      updated_by: user,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  return normalized;
+}
+
+async function campaignReplyTo(campaignId?: string | null) {
+  if (!campaignId) return replyTo();
+  const rows = await db(`outreach_settings?select=value&key=eq.${encodeURIComponent(campaignReplyToKey(campaignId))}&limit=1`);
+  return normalizedReplyTo(rows[0]?.value?.email, replyTo());
 }
 
 const generic = new Set(["admin", "contact", "info", "sales", "office", "support", "team", "hello", "marketing", "secretary", "president", "communications"]);
@@ -94,11 +126,11 @@ Please let me know a suitable time to connect.`;
 
 export async function GET(req: NextRequest) {
   try {
-    const [queue, researchAudit, backgroundJobs, settings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
+    const [queue, researchAudit, backgroundJobs, allSettings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
       db("outreach_queue?select=*&order=created_at.desc&limit=1000"),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
       listBackgroundJobs(),
-      db("outreach_settings?select=*&key=eq.sending_policy"),
+      db("outreach_settings?select=key,value"),
       db("campaigns?select=id,name,status,sender_name,sender_email&order=created_at.desc"),
       db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&order=generated_at.desc&limit=1000"),
       db("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc&limit=1000"),
@@ -106,9 +138,19 @@ export async function GET(req: NextRequest) {
       db("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc&limit=1000"),
       db("activity_log?select=id,company_id,contact_id,action,details,created_at&order=created_at.desc&limit=100"),
     ]);
+    const sendingSettings = allSettings.find((item: Record<string, any>) => item.key === "sending_policy");
+    const replyToByCampaign = new Map(
+      allSettings
+        .filter((item: Record<string, any>) => String(item.key || "").startsWith("campaign_reply_to:"))
+        .map((item: Record<string, any>) => [String(item.key).slice("campaign_reply_to:".length), normalizedReplyTo(item.value?.email, replyTo())]),
+    );
+    const campaignsWithReplyTo = campaigns.map((campaign: Record<string, any>) => ({
+      ...campaign,
+      reply_to_email: replyToByCampaign.get(String(campaign.id)) || replyTo(),
+    }));
     const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
     const companyById = new Map(companies.map((item: Record<string, any>) => [item.id, item]));
-    const campaignById = new Map(campaigns.map((item: Record<string, any>) => [item.id, item]));
+    const campaignById = new Map(campaignsWithReplyTo.map((item: Record<string, any>) => [item.id, item]));
     const latestSendByEmailId = new Map<string, Record<string, any>>();
     for (const item of sends) {
       if (item.generated_email_id && !latestSendByEmailId.has(item.generated_email_id)) latestSendByEmailId.set(item.generated_email_id, item);
@@ -206,8 +248,8 @@ export async function GET(req: NextRequest) {
       queue,
       jobs: backgroundJobs,
       researchAudit,
-      settings: settings[0]?.value || {},
-      campaigns,
+      settings: sendingSettings?.value || {},
+      campaigns: campaignsWithReplyTo,
       liveEmails,
       liveContacts,
       liveCompanies,
@@ -261,7 +303,9 @@ export async function POST(req: NextRequest) {
       }
 
       const selectedSender = await selectVerifiedSender(body.senderEmail);
+      const selectedReplyTo = normalizedReplyTo(body.replyToEmail, selectedSender.email);
       const campaign = await ensureCampaign(campaignName, "researching", selectedSender);
+      await saveCampaignReplyTo(campaign.id, selectedReplyTo, user);
       const job = await queueBackgroundCampaign({
         campaignId: campaign.id,
         campaignName,
@@ -282,11 +326,59 @@ export async function POST(req: NextRequest) {
             job_id: job.id,
             websites: suppliedWebsites.length,
             known_contacts: parsedContacts.length,
+            reply_to_email: selectedReplyTo,
             queued_by: user,
           },
         }),
       });
-      return NextResponse.json({ ok: true, queued: true, job, campaign }, { status: 202 });
+      return NextResponse.json({ ok: true, queued: true, job, campaign: { ...campaign, reply_to_email: selectedReplyTo } }, { status: 202 });
+    }
+
+    if (body.action === "cancel_background_campaign") {
+      const jobId = String(body.jobId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+        return NextResponse.json({ ok: false, error: "A valid background campaign job is required." }, { status: 400 });
+      }
+      const queueDb = getQueueDb();
+      const jobResult = await queueDb.prepare("SELECT * FROM background_research_jobs WHERE id = ? LIMIT 1").bind(jobId).all();
+      const job = jobResult.results?.[0] as Record<string, any> | undefined;
+      if (!job) return NextResponse.json({ ok: false, error: "Background campaign job not found." }, { status: 404 });
+      if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(job.status))) {
+        return NextResponse.json({ ok: true, jobId, status: job.status, alreadyFinished: true });
+      }
+      const now = new Date().toISOString();
+      await queueDb.batch([
+        queueDb.prepare(`
+          UPDATE background_research_jobs
+          SET status = 'cancelled', last_error = 'Stopped by an authorized operator.',
+              completed_at = ?, updated_at = ?
+          WHERE id = ? AND status IN ('queued', 'researching')
+        `).bind(now, now, jobId),
+        queueDb.prepare(`
+          UPDATE background_research_items
+          SET status = 'cancelled', claimed_by = NULL,
+              error = COALESCE(error, 'Stopped by an authorized operator.'), updated_at = ?
+          WHERE job_id = ? AND status IN ('queued', 'researching')
+        `).bind(now, jobId),
+      ]);
+      const preservedDrafts = await db(`generated_emails?select=id&campaign_id=eq.${encodeURIComponent(String(job.campaign_id))}&limit=1000`);
+      const campaignStatus = preservedDrafts.length > 0 ? "draft_pending_review" : "research_cancelled";
+      await db(`campaigns?id=eq.${encodeURIComponent(String(job.campaign_id))}`, { method: "PATCH", body: JSON.stringify({ status: campaignStatus }) });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "background_campaign_cancelled",
+          details: {
+            campaign_id: job.campaign_id,
+            campaign_name: job.campaign_name,
+            job_id: jobId,
+            stopped_by: user,
+            completed_items: Number(job.completed_items || 0),
+            drafts_preserved: preservedDrafts.length,
+          },
+        }),
+      });
+      return NextResponse.json({ ok: true, jobId, status: "cancelled", campaignStatus });
     }
 
     if (body.action === "process_background_campaign") {
@@ -456,6 +548,40 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, email: rows[0] });
     }
 
+    if (body.action === "delete_generated_email") {
+      const emailId = String(body.emailId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(emailId)) {
+        return NextResponse.json({ ok: false, error: "Choose a valid generated email to delete." }, { status: 400 });
+      }
+      const rows = await db(`generated_emails?select=*&id=eq.${encodeURIComponent(emailId)}&limit=1`);
+      const email = rows[0];
+      if (!email) return NextResponse.json({ ok: false, error: "This generated email no longer exists." }, { status: 404 });
+      const sends = await db(`email_sends?select=id,status&generated_email_id=eq.${encodeURIComponent(emailId)}&limit=20`);
+      const protectedSend = sends.find((send: Record<string, any>) =>
+        String(send.status || "") === "sent" || String(send.status || "").startsWith("scheduled"),
+      );
+      if (email.status === "sent" || email.status === "scheduled" || protectedSend) {
+        return NextResponse.json(
+          { ok: false, error: "Sent or scheduled emails cannot be deleted. Cancel a scheduled delivery first." },
+          { status: 409 },
+        );
+      }
+      await db(`generated_emails?id=eq.${encodeURIComponent(emailId)}`, { method: "DELETE" });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "generated_email_deleted",
+          details: {
+            generated_email_id: emailId,
+            campaign_id: email.campaign_id,
+            contact_id: email.contact_id,
+            subject: email.subject,
+          },
+        }),
+      });
+      return NextResponse.json({ ok: true, deletedId: emailId });
+    }
+
     if (body.action === "clean_unresolved_placeholders") {
       const rows = await db("generated_emails?select=id,html_body,status&status=in.(draft_pending_review,approved)&limit=1000");
       const changed = rows
@@ -534,7 +660,8 @@ export async function POST(req: NextRequest) {
       if (ids.length > dailyLimit) {
         return NextResponse.json({ ok: false, error: `Your safety limit is ${dailyLimit} emails per batch. Select fewer emails or update the limit.` }, { status: 400 });
       }
-      const delayMinutes = Math.max(1, Math.min(60, Number(body.delayMinutes || policy.minimum_delay_minutes || 5)));
+      const globalMinimumGap = Math.max(1, Math.min(60, Number(policy.minimum_delay_minutes || 1)));
+      const delayMinutes = Math.max(globalMinimumGap, Math.min(60, Number(body.delayMinutes || globalMinimumGap)));
       const finalTime = new Date(start.getTime() + (ids.length - 1) * delayMinutes * 60_000);
       const windowStart = String(policy.sending_window_start || "10:00");
       const windowEnd = String(policy.sending_window_end || "17:00");
@@ -619,10 +746,12 @@ export async function POST(req: NextRequest) {
       if (!campaign) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
       if (!mails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unscheduled emails." }, { status: 400 });
       if (mails.length > 600) return NextResponse.json({ ok: false, error: "Schedule up to 600 approved emails in one campaign." }, { status: 400 });
-      const delayMinutes = Math.max(1, Math.min(60, Number(body.delayMinutes || policy.minimum_delay_minutes || 5)));
+      const globalMinimumGap = Math.max(1, Math.min(60, Number(policy.minimum_delay_minutes || 1)));
+      const delayMinutes = Math.max(globalMinimumGap, Math.min(60, Number(body.delayMinutes || globalMinimumGap)));
+      const batchSize = Math.max(1, Math.min(3, Number(body.batchSize || 1)));
       let scheduleTimes: Date[];
       try {
-        scheduleTimes = buildCampaignSchedule(start, mails.length, delayMinutes, policy);
+        scheduleTimes = buildCampaignSchedule(start, mails.length, batchSize, delayMinutes, policy);
       } catch (error) {
         return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "The campaign schedule is invalid." }, { status: 400 });
       }
@@ -707,6 +836,8 @@ export async function POST(req: NextRequest) {
             failed: results.length - successful.length,
             first_scheduled_for: successful[0]?.scheduledAt || null,
             last_scheduled_for: successful.at(-1)?.scheduledAt || null,
+            batch_size: batchSize,
+            gap_minutes: delayMinutes,
             scheduled_by: user,
           },
         }),
@@ -871,7 +1002,20 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "policy") {
-      const value = { mode: "manual_approval", daily_limit: Math.max(1, Math.min(1000, Number(body.dailyLimit || 25))), sending_window_start: body.windowStart || "10:00", sending_window_end: body.windowEnd || "17:00", timezone: "Asia/Kolkata", minimum_delay_minutes: Math.max(1, Math.min(60, Number(body.delay || 5))), paused: Boolean(body.paused) };
+      const dailyLimit = Number(body.dailyLimit);
+      const minimumDelay = Number(body.delay);
+      if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+        return NextResponse.json({ ok: false, error: "Daily sending limit must be between 1 and 1,000." }, { status: 400 });
+      }
+      if (!Number.isInteger(minimumDelay) || minimumDelay < 1 || minimumDelay > 60) {
+        return NextResponse.json({ ok: false, error: "Minimum spacing must be between 1 and 60 minutes." }, { status: 400 });
+      }
+      const windowStart = String(body.windowStart || "");
+      const windowEnd = String(body.windowEnd || "");
+      if (!/^\d{2}:\d{2}$/.test(windowStart) || !/^\d{2}:\d{2}$/.test(windowEnd) || windowStart >= windowEnd) {
+        return NextResponse.json({ ok: false, error: "Choose a valid sending window with the end time later than the start time." }, { status: 400 });
+      }
+      const value = { mode: "manual_approval", daily_limit: dailyLimit, sending_window_start: windowStart, sending_window_end: windowEnd, timezone: "Asia/Kolkata", minimum_delay_minutes: minimumDelay, paused: Boolean(body.paused) };
       await db("outreach_settings?key=eq.sending_policy", { method: "PATCH", body: JSON.stringify({ value, updated_by: user, updated_at: new Date().toISOString() }) });
       return NextResponse.json({ ok: true, settings: value });
     }
@@ -961,7 +1105,7 @@ async function ensureCampaign(campaignName: string, status = "paused_user_hold",
     campaigns = updated.length ? updated : campaigns;
   }
   if (!campaigns[0]) throw new Error("The campaign could not be created.");
-  return campaigns[0];
+  return { ...campaigns[0], reply_to_email: await campaignReplyTo(campaigns[0].id) };
 }
 
 async function queueBackgroundCampaign(input: {
@@ -1023,7 +1167,7 @@ async function processBackgroundCampaignBatch(jobId: string) {
   const jobResult = await queueDb.prepare("SELECT * FROM background_research_jobs WHERE id = ? LIMIT 1").bind(jobId).all();
   const job = jobResult.results?.[0] as Record<string, any> | undefined;
   if (!job) throw new Error("Background campaign job not found.");
-  if (["completed", "completed_with_issues", "failed"].includes(String(job.status))) {
+  if (["completed", "completed_with_issues", "failed", "cancelled"].includes(String(job.status))) {
     return { jobId, status: job.status, remaining: 0, completedItems: Number(job.completed_items || 0), totalItems: Number(job.total_items || 0) };
   }
 
@@ -1063,7 +1207,7 @@ async function processBackgroundCampaignBatch(jobId: string) {
   await queueDb.prepare(`
     UPDATE background_research_jobs
     SET status = 'researching', started_at = COALESCE(started_at, ?), updated_at = ?
-    WHERE id = ?
+    WHERE id = ? AND status IN ('queued', 'researching')
   `).bind(nowIso, nowIso, jobId).run();
 
   const outcomes = await Promise.all(claimed.map(async (item) => {
@@ -1078,7 +1222,7 @@ async function processBackgroundCampaignBatch(jobId: string) {
     await queueDb.batch(outcomes.map((outcome) => queueDb.prepare(`
       UPDATE background_research_items
       SET status = ?, result = ?, error = ?, claimed_by = NULL, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'researching'
     `).bind(
       outcome.ok ? "completed" : "failed",
       outcome.ok ? JSON.stringify(outcome.result) : null,
@@ -1086,6 +1230,22 @@ async function processBackgroundCampaignBatch(jobId: string) {
       new Date().toISOString(),
       outcome.item.id,
     )));
+  }
+
+  const latestJobResult = await queueDb.prepare("SELECT * FROM background_research_jobs WHERE id = ? LIMIT 1").bind(jobId).all();
+  const latestJob = latestJobResult.results?.[0] as Record<string, any> | undefined;
+  if (String(latestJob?.status || "") === "cancelled") {
+    return {
+      jobId,
+      status: "cancelled",
+      remaining: 0,
+      totalItems: Number(latestJob?.total_items || job.total_items || 0),
+      completedItems: Number(latestJob?.completed_items || job.completed_items || 0),
+      successfulItems: Number(latestJob?.successful_items || job.successful_items || 0),
+      failedItems: Number(latestJob?.failed_items || job.failed_items || 0),
+      draftsCreated: Number(latestJob?.drafts_created || job.drafts_created || 0),
+      contactsFound: Number(latestJob?.contacts_found || job.contacts_found || 0),
+    };
   }
 
   const addedDrafts = outcomes.reduce((total, outcome) => total + (outcome.ok ? Number(outcome.result.draftsCreated || 0) : 0), 0);
@@ -1158,6 +1318,7 @@ async function processBackgroundCampaignBatch(jobId: string) {
 }
 
 async function processBackgroundResearchItem(item: Record<string, any>, job: Record<string, any>) {
+  await assertBackgroundJobActive(String(job.id));
   const payload = JSON.parse(String(item.payload || "{}"));
   const common = {
     topic: job.topic,
@@ -1179,11 +1340,13 @@ async function processBackgroundResearchItem(item: Record<string, any>, job: Rec
   }
 
   const research = await researchWebsite(String(payload.website || item.input_value));
+  await assertBackgroundJobActive(String(job.id));
   const emails = [...new Set(research.discoveredEmails.map((email) => email.toLowerCase()))].slice(0, 10);
   const drafts: Array<Record<string, any>> = [];
   const errors: string[] = [];
   for (const email of emails) {
     try {
+      await assertBackgroundJobActive(String(job.id));
       const created = await createDraftRecord({
         ...common,
         email,
@@ -1207,6 +1370,15 @@ async function processBackgroundResearchItem(item: Record<string, any>, job: Rec
     drafts,
     errors,
   };
+}
+
+async function assertBackgroundJobActive(jobId: string) {
+  const result = await getQueueDb().prepare(
+    "SELECT status FROM background_research_jobs WHERE id = ? LIMIT 1",
+  ).bind(jobId).all();
+  if (String(result.results?.[0]?.status || "") === "cancelled") {
+    throw new Error("Campaign research was stopped.");
+  }
 }
 
 async function createDraftRecord(input: Record<string, any>, user: string) {
@@ -1270,6 +1442,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     name: String(campaign.sender_name || sender.name),
     email: String(campaign.sender_email || sender.email),
   };
+  const campaignReplyToEmail = normalizedReplyTo(campaign.reply_to_email, replyTo());
   const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research, template: input.emailTemplate, senderName: campaignSender.name });
   const drafts = await db("generated_emails", {
     method: "POST",
@@ -1293,7 +1466,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
         website,
         sender_name: campaignSender.name,
         sender_email: campaignSender.email,
-        reply_to_email: replyTo(),
+        reply_to_email: campaignReplyToEmail,
         email_font: "Calibri",
         email_font_size: "11pt",
         bold_underline_organization: true,
@@ -1739,72 +1912,22 @@ function chunk<T>(items: T[], size: number) {
   return groups;
 }
 
-function buildCampaignSchedule(start: Date, count: number, delayMinutes: number, policy: Record<string, any>) {
-  const indiaOffsetMinutes = 330;
-  const windowStart = parseClock(String(policy.sending_window_start || "10:00"));
-  const windowEnd = parseClock(String(policy.sending_window_end || "17:00"));
-  if (windowEnd <= windowStart) throw new Error("The sending window end must be later than its start.");
-  if (!insideIndiaWindow(start, String(policy.sending_window_start || "10:00"), String(policy.sending_window_end || "17:00"))) {
-    throw new Error(`Choose a start time inside the ${policy.sending_window_start || "10:00"}–${policy.sending_window_end || "17:00"} Asia/Kolkata sending window.`);
-  }
-  const dailyLimit = Math.max(1, Math.min(1000, Number(policy.daily_limit || 25)));
-  const dayCounts = new Map<string, number>();
-  const times: Date[] = [];
-  let cursor = new Date(start);
-  for (let index = 0; index < count; index += 1) {
-    while (true) {
-      const shifted = new Date(cursor.getTime() + indiaOffsetMinutes * 60_000);
-      const year = shifted.getUTCFullYear();
-      const month = shifted.getUTCMonth();
-      const day = shifted.getUTCDate();
-      const minutes = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
-      const dayKey = `${year}-${month + 1}-${day}`;
-      const used = dayCounts.get(dayKey) || 0;
-      if (minutes < windowStart) {
-        cursor = indiaLocalDate(year, month, day, windowStart, indiaOffsetMinutes);
-        continue;
-      }
-      if (minutes > windowEnd || used >= dailyLimit) {
-        cursor = indiaLocalDate(year, month, day + 1, windowStart, indiaOffsetMinutes);
-        continue;
-      }
-      times.push(new Date(cursor));
-      dayCounts.set(dayKey, used + 1);
-      cursor = new Date(cursor.getTime() + delayMinutes * 60_000);
-      break;
-    }
-  }
-  return times;
-}
-
-function parseClock(value: string) {
-  const [hours, minutes] = value.split(":").map(Number);
-  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
-    throw new Error("The configured sending window is invalid.");
-  }
-  return hours * 60 + minutes;
-}
-
-function indiaLocalDate(year: number, month: number, day: number, minutes: number, offsetMinutes: number) {
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  return new Date(Date.UTC(year, month, day, hours, mins) - offsetMinutes * 60_000);
-}
-
-function insideIndiaWindow(date: Date, start: string, end: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
-  return parts >= start && parts <= end;
+async function replyToForMail(mail: Record<string, any>) {
+  const savedOnDraft = mail.personalization_data?.reply_to_email;
+  if (savedOnDraft) return normalizedReplyTo(savedOnDraft, replyTo());
+  return campaignReplyTo(mail.campaign_id);
 }
 
 async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string) {
   const htmlContent = cleanupUnresolvedHtml(mail.html_body);
   const campaignSender = await senderForMail(mail);
+  const campaignReplyToEmail = await replyToForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
     body: JSON.stringify({
       sender: campaignSender,
-      replyTo: { email: replyTo() },
+      replyTo: { email: campaignReplyToEmail },
       to: [{ email: contact.email, name: contact.full_name || undefined }],
       subject: mail.subject,
       htmlContent,
@@ -1821,12 +1944,13 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
   const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
   const htmlContent = cleanupUnresolvedHtml(mail.html_body);
   const campaignSender = await senderForMail(mail);
+  const campaignReplyToEmail = await replyToForMail(mail);
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
     body: JSON.stringify({
       sender: campaignSender,
-      replyTo: { email: replyTo() },
+      replyTo: { email: campaignReplyToEmail },
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
       htmlContent: `${previewBanner}${htmlContent}`,

@@ -60,6 +60,8 @@ const statusLabel: Record<string, string> = {
   completed_with_issues: "Completed with issues",
   research_failed: "Research failed",
   research_complete_no_contacts: "No contacts found",
+  research_cancelled: "Research stopped",
+  cancelled: "Stopped",
   needs_attention: "Needs attention",
   empty: "Empty",
   paused_no_credits: "Paused",
@@ -85,6 +87,10 @@ function compactDate(value?: string | null) {
     month: "short",
     year: "numeric",
   }).format(new Date(value));
+}
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
 
 function shortName(name: string) {
@@ -135,7 +141,7 @@ function Metric({ label, value, note, tone }: { label: string; value: number; no
   );
 }
 
-function EmailTable({ rows, onOpen, compact = false, selected, onSelect }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean; selected?: Set<string>; onSelect?: (id: string, checked: boolean) => void }) {
+function EmailTable({ rows, onOpen, compact = false, selected, onSelect, onDelete, deletingDisabled = false }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean; selected?: Set<string>; onSelect?: (id: string, checked: boolean) => void; onDelete?: (email: EmailRecord) => void; deletingDisabled?: boolean }) {
   const selectable = Boolean(selected && onSelect);
   const allSelected = selectable && rows.length > 0 && rows.every((email) => selected!.has(email.id));
   return (
@@ -149,6 +155,7 @@ function EmailTable({ rows, onOpen, compact = false, selected, onSelect }: { row
             <th>Status</th>
             {!compact && <th>Campaign</th>}
             <th>Generated</th>
+            {onDelete && <th>Action</th>}
           </tr>
         </thead>
         <tbody>
@@ -163,6 +170,7 @@ function EmailTable({ rows, onOpen, compact = false, selected, onSelect }: { row
               <td><StatusPill value={email.sendStatus || email.status} /></td>
               {!compact && <td>{email.campaign}</td>}
               <td>{compactDate(email.generatedAt)}</td>
+              {onDelete && <td onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><button type="button" className="delete-email-action" disabled={deletingDisabled || email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")} onClick={() => onDelete(email)} title={email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled") ? "Sent or scheduled emails cannot be deleted" : "Delete this generated email"}>Delete</button></td>}
             </tr>
           ))}
         </tbody>
@@ -206,12 +214,14 @@ Please let me know a suitable time to connect.`,
     websites: "",
     brief: "",
     senderEmail: "tanishka@iknowai.in",
+    replyToEmail: "tanishka@iknowai.in",
   });
+  const [replyToChoice, setReplyToChoice] = useState("sender");
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [websiteScans, setWebsiteScans] = useState<WebsiteScanRecord[]>([]);
   const [scanningWebsites, setScanningWebsites] = useState(false);
-  const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", delayMinutes: 5, confirmed: false });
+  const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", batchSize: 1, delayMinutes: 5, confirmed: false });
   const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send">("schedule");
   const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
@@ -238,9 +248,13 @@ Please let me know a suitable time to connect.`,
   useEffect(() => {
     const available = control?.availableSenders || [];
     if (available.length && !available.some((item) => item.email === intakeForm.senderEmail)) {
-      setIntakeForm((current) => ({ ...current, senderEmail: available[0].email }));
+      setIntakeForm((current) => ({
+        ...current,
+        senderEmail: available[0].email,
+        ...(replyToChoice === "sender" ? { replyToEmail: available[0].email } : {}),
+      }));
     }
-  }, [control?.availableSenders, intakeForm.senderEmail]);
+  }, [control?.availableSenders, intakeForm.senderEmail, replyToChoice]);
 
   useEffect(() => {
     const active = (control?.jobs || []).some((job) => ["queued", "researching"].includes(String(job.status)));
@@ -317,6 +331,8 @@ Please let me know a suitable time to connect.`,
     failed: data.summary.failed,
   }, [control?.liveStats]);
   const paused = control?.settings?.paused ?? true;
+  const globalMinimumGap = Math.max(1, Number(control?.settings?.minimum_delay_minutes || 1));
+  const effectiveCampaignGap = Math.max(globalMinimumGap, queueForm.delayMinutes);
   const backgroundJobs = useMemo<BackgroundJob[]>(() => (control?.jobs || []) as BackgroundJob[], [control?.jobs]);
   const activeBackgroundJobs = useMemo(() => backgroundJobs.filter((job) => ["queued", "researching"].includes(job.status)), [backgroundJobs]);
   const displayCampaigns = useMemo(() => control?.campaigns?.length ? control.campaigns.map((campaign) => ({
@@ -326,6 +342,7 @@ Please let me know a suitable time to connect.`,
     drafts: displayEmails.filter((email) => email.campaign === campaign.name).length,
     senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
     senderEmail: String(campaign.sender_email || control.sender?.email || "tanishka@iknowai.in"),
+    replyToEmail: String(campaign.reply_to_email || control.replyTo || "tanishka@iknowai.in"),
   })) : data.campaigns.map((campaign) => ({ ...campaign, id: campaign.name })), [control?.campaigns, control?.sender, displayEmails, paused]);
   const selectedCampaign = displayCampaigns.find((campaign) => campaign.id === queueForm.campaignId) || displayCampaigns[0];
   const selectedCampaignEmails = selectedCampaign ? displayEmails.filter((email) => email.campaign === selectedCampaign.name) : [];
@@ -362,6 +379,7 @@ Please let me know a suitable time to connect.`,
     const researchJob = backgroundJobs.find((job) => job.campaignId === campaign.id);
     let lifecycle = "empty";
     if (researchJob && ["queued", "researching"].includes(researchJob.status)) lifecycle = researchJob.status;
+    else if (researchJob?.status === "cancelled") lifecycle = emails.length ? "draft_pending_review" : "cancelled";
     else if (failed > 0 || researchJob?.status === "completed_with_issues" || researchJob?.status === "failed") lifecycle = "needs_attention";
     else if (sent > 0 && sent < emails.length) lifecycle = "running";
     else if (emails.length > 0 && sent === emails.length) lifecycle = "completed";
@@ -391,7 +409,7 @@ Please let me know a suitable time to connect.`,
   const filteredCampaigns = useMemo(() => {
     const term = search.trim().toLowerCase();
     return campaignSummaries.filter((campaign) => {
-      const matchesTerm = !term || `${campaign.name} ${campaign.senderName} ${campaign.senderEmail}`.toLowerCase().includes(term);
+      const matchesTerm = !term || `${campaign.name} ${campaign.senderName} ${campaign.senderEmail} ${campaign.replyToEmail}`.toLowerCase().includes(term);
       const matchesStatus = campaignStatusFilter === "all" ||
         (campaignStatusFilter === "active" && ["queued", "researching", "approved", "scheduled", "running"].includes(campaign.lifecycle)) ||
         campaign.lifecycle === campaignStatusFilter;
@@ -540,6 +558,14 @@ Please let me know a suitable time to connect.`,
     }
   }
 
+  async function stopBackgroundJob(job: BackgroundJob) {
+    if (!window.confirm(`Stop background research for “${job.campaignName}”? Completed contacts and drafts will be kept, but unprocessed sources will be cancelled.`)) return;
+    await runAction(
+      { action: "cancel_background_campaign", jobId: job.id },
+      `Background research for ${job.campaignName} was stopped. Completed work was preserved.`,
+    );
+  }
+
   async function approveSelectedCampaign() {
     const ids = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review").map((email) => email.id);
     if (!ids.length) {
@@ -548,6 +574,27 @@ Please let me know a suitable time to connect.`,
       return;
     }
     await runAction({ action: "approve_batch", emailIds: ids }, `${ids.length} campaign drafts approved. Nothing has been sent.`);
+  }
+
+  async function deleteCampaignEmail(email: EmailRecord) {
+    if (email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")) {
+      setNoticeTone("error");
+      setNotice("Sent or scheduled emails cannot be deleted. Cancel a scheduled delivery first.");
+      return;
+    }
+    if (!window.confirm(`Delete the generated email for ${email.recipient} from this campaign?\n\nThe contact and company will remain in the database.`)) return;
+    const result = await runAction(
+      { action: "delete_generated_email", emailId: email.id },
+      `The generated email for ${email.recipient} was deleted. Its contact and company were kept.`,
+    );
+    if (result) {
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        next.delete(email.id);
+        return next;
+      });
+      if (selectedEmail?.id === email.id) setSelectedEmail(null);
+    }
   }
 
   async function scheduleSelectedCampaign() {
@@ -561,6 +608,7 @@ Please let me know a suitable time to connect.`,
       action: "schedule_campaign",
       campaignId: selectedCampaign.id,
       scheduledFor: new Date(queueForm.scheduledFor).toISOString(),
+      batchSize: queueForm.batchSize,
       delayMinutes: queueForm.delayMinutes,
       confirm: queueForm.confirmed,
     }, `${selectedCampaign.name} was handed to Brevo for automatic scheduled delivery.`);
@@ -646,6 +694,11 @@ Please let me know a suitable time to connect.`,
     if (!intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim()) {
       setNoticeTone("error");
       setNotice("Add a campaign name, email topic, and template before creating drafts.");
+      return;
+    }
+    if (!isValidEmail(intakeForm.replyToEmail)) {
+      setNoticeTone("error");
+      setNotice("Select or enter a valid Reply-To email address.");
       return;
     }
     if (intakeFile) {
@@ -858,7 +911,7 @@ Please let me know a suitable time to connect.`,
                   <div className="background-job-list">
                     {activeBackgroundJobs.map((job) => {
                       const progress = job.totalItems ? Math.round((job.completedItems / job.totalItems) * 100) : 0;
-                      return <article key={job.id}><span className="campaign-symbol">{job.campaignName.slice(0, 2).toUpperCase()}</span><div><strong>{job.campaignName}</strong><small>{job.completedItems} of {job.totalItems} sources processed · {job.contactsFound} contacts found · {job.draftsCreated} drafts created</small><i><b style={{ width: `${progress}%` }} /></i></div><StatusPill value={job.status} /></article>;
+                      return <article key={job.id}><span className="campaign-symbol">{job.campaignName.slice(0, 2).toUpperCase()}</span><div><strong>{job.campaignName}</strong><small>{job.completedItems} of {job.totalItems} sources processed · {job.contactsFound} contacts found · {job.draftsCreated} drafts created</small><i><b style={{ width: `${progress}%` }} /></i></div><div className="background-job-actions"><StatusPill value={job.status} /><button type="button" disabled={working || !control?.canManage} onClick={() => stopBackgroundJob(job)}>Stop processing</button></div></article>;
                     })}
                   </div>
                 </section>
@@ -917,7 +970,7 @@ Please let me know a suitable time to connect.`,
                   <article className="panel campaign-detail-panel">
                     <div className="campaign-detail-heading">
                       <div className="campaign-symbol">{selectedCampaignSummary.name.slice(0, 2).toUpperCase()}</div>
-                      <div><p className="eyebrow">Selected campaign</p><h2>{selectedCampaignSummary.name}</h2><span>{selectedCampaignSummary.senderName} · {selectedCampaignSummary.senderEmail}</span></div>
+                      <div><p className="eyebrow">Selected campaign</p><h2>{selectedCampaignSummary.name}</h2><span>{selectedCampaignSummary.senderName} · {selectedCampaignSummary.senderEmail} · Reply-To: {selectedCampaignSummary.replyToEmail}</span></div>
                       <StatusPill value={selectedCampaignSummary.lifecycle} />
                     </div>
 
@@ -1002,7 +1055,7 @@ Please let me know a suitable time to connect.`,
                       <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
                     </div>
                   )}
-                  <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
+                  <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} onDelete={deleteCampaignEmail} deletingDisabled={working || !control?.canManage} />
                   <div className="pagination"><span>Page {page} of {campaignEmailPages}</span><div><button disabled={page === 1} onClick={() => setPage((current) => current - 1)}>Previous</button><button disabled={page === campaignEmailPages} onClick={() => setPage((current) => current + 1)}>Next</button></div></div>
                 </section>
               )}
@@ -1018,7 +1071,7 @@ Please let me know a suitable time to connect.`,
                       <section>
                         <div className="campaign-step-heading"><span>1</span><div><strong>Review campaign audience</strong><p>All recipients below belong only to this selected campaign.</p></div></div>
                         <div className="campaign-recipient-list">
-                          {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></div>)}
+                          {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><span className="campaign-recipient-actions"><StatusPill value={email.sendStatus || email.status} /><button type="button" className="delete-email-action" disabled={working || !control?.canManage || email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")} onClick={() => deleteCampaignEmail(email)} title={email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled") ? "Sent or scheduled emails cannot be deleted" : "Delete this generated email"}>Delete</button></span></div>)}
                           {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => setCampaignWorkspaceView("emails")}>Review all {selectedCampaignEmails.length} campaign emails →</button>}
                         </div>
                       </section>
@@ -1035,7 +1088,8 @@ Please let me know a suitable time to connect.`,
                         {campaignDeliveryChoice === "schedule" ? (
                           <div className="campaign-schedule-form">
                             <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
-                            <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
+                            <label><span>Emails in each batch</span><select value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Number(event.target.value) })}><option value={1}>1 email at a time</option><option value={2}>2 emails at a time</option><option value={3}>3 emails at a time</option></select><small>Emails in one batch are submitted together.</small></label>
+                            <label><span>Gap between batches</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={3}>3 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. The global minimum and sending hours always apply.</small></label>
                             <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
                             <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
                           </div>
@@ -1162,17 +1216,37 @@ Please let me know a suitable time to connect.`,
                   )}
                   <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
                   <section className="campaign-creation-actions">
-                    <label className="campaign-sender-field">
-                      <span>Verified Brevo sender</span>
-                      <select value={intakeForm.senderEmail} onChange={(event) => setIntakeForm({ ...intakeForm, senderEmail: event.target.value })}>
-                        {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
-                      </select>
-                      <small>This sender is stored on the campaign and used in the email signature and Brevo delivery.</small>
-                    </label>
+                    <div className="campaign-identity-fields">
+                      <label className="campaign-sender-field">
+                        <span>Verified Brevo sender</span>
+                        <select value={intakeForm.senderEmail} onChange={(event) => {
+                          const senderEmail = event.target.value;
+                          setIntakeForm((current) => ({ ...current, senderEmail, ...(replyToChoice === "sender" ? { replyToEmail: senderEmail } : {}) }));
+                        }}>
+                          {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
+                        </select>
+                        <small>Used as the visible From address and email signature.</small>
+                      </label>
+                      <label className="campaign-sender-field campaign-reply-field">
+                        <span>Reply-To email</span>
+                        <select value={replyToChoice} onChange={(event) => {
+                          const choice = event.target.value;
+                          setReplyToChoice(choice);
+                          if (choice === "sender") setIntakeForm((current) => ({ ...current, replyToEmail: current.senderEmail }));
+                          else if (choice !== "custom") setIntakeForm((current) => ({ ...current, replyToEmail: choice }));
+                        }}>
+                          <option value="sender">Same as selected sender</option>
+                          {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={`reply-${item.email}`} value={item.email}>{item.email}</option>)}
+                          <option value="custom">Enter another email</option>
+                        </select>
+                        {replyToChoice === "custom" && <input type="email" required value={intakeForm.replyToEmail} onChange={(event) => setIntakeForm({ ...intakeForm, replyToEmail: event.target.value })} placeholder="replies@yourcompany.com" autoComplete="email" aria-label="Custom Reply-To email" />}
+                        <small>Replies from recipients will be delivered to {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "the valid inbox you enter"}.</small>
+                      </label>
+                    </div>
                     <div className="campaign-paths">
                       <div><strong>Choose what happens next</strong><span>Research runs in the background. Sending always remains behind review, approval, and confirmation.</span></div>
-                      <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
-                      <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>Continue to campaign setup</button>
+                      <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
+                      <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>Continue to campaign setup</button>
                     </div>
                   </section>
                 </form>
@@ -1183,7 +1257,7 @@ Please let me know a suitable time to connect.`,
                   <p className="eyebrow">How the intelligence works</p><h2>Smart, but reviewable</h2>
                   <ol className="intelligence-list"><li><b>Extract</b><span>Find emails, names, websites, and company clues in pasted text or documents.</span></li><li><b>Enrich</b><span>Derive the organization from the domain and inspect its public web presence.</span></li><li><b>Personalize</b><span>Connect the company’s focus with your outreach topic and relevant use cases.</span></li><li><b>Address correctly</b><span>Use a clear personal name when confidently available; otherwise Dear Sir/Madam.</span></li><li><b>Save safely</b><span>Update companies and contacts, prevent duplicates, and create drafts for manual review.</span></li></ol>
                 </article>
-                <article className="panel guardrail-card"><span className="guardrail-dot" /><div><strong>Sending remains protected</strong><p>Reply-To is tanishka@iknowai.in. Approval is still mandatory.</p></div></article>
+                <article className="panel guardrail-card"><span className="guardrail-dot" /><div><strong>Sending remains protected</strong><p>Reply-To is {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "waiting for a valid email"}. Approval is still mandatory.</p></div></article>
               </aside>
 
               {intakeResults.length > 0 && (
@@ -1220,7 +1294,7 @@ Please let me know a suitable time to connect.`,
                     <section>
                       <div className="campaign-step-heading"><span>1</span><div><strong>Review campaign audience</strong><p>Client names remain inside this campaign—there is no long single-email dropdown.</p></div></div>
                       <div className="campaign-recipient-list">
-                        {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><StatusPill value={email.sendStatus || email.status} /></div>)}
+                        {selectedCampaignEmails.slice(0, 12).map((email) => <div key={email.id}><span><strong>{email.company}</strong><small>{email.recipient}</small></span><span className="campaign-recipient-actions"><StatusPill value={email.sendStatus || email.status} /><button type="button" className="delete-email-action" disabled={working || !control?.canManage || email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")} onClick={() => deleteCampaignEmail(email)} title={email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled") ? "Sent or scheduled emails cannot be deleted" : "Delete this generated email"}>Delete</button></span></div>)}
                         {selectedCampaignEmails.length > 12 && <button type="button" onClick={() => openCampaignWorkspace("emails", selectedCampaign.name)}>View all {selectedCampaignEmails.length} campaign emails →</button>}
                       </div>
                     </section>
@@ -1234,7 +1308,8 @@ Please let me know a suitable time to connect.`,
                       <div className="campaign-step-heading"><span>3</span><div><strong>Schedule automatic delivery</strong><p>Brevo stores the schedule and sends while this dashboard and your computer are closed.</p></div></div>
                       <div className="campaign-schedule-form">
                         <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
-                        <label><span>Spacing between emails</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Delivery also follows the daily limit and sending window.</small></label>
+                        <label><span>Emails in each batch</span><select value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Number(event.target.value) })}><option value={1}>1 email at a time</option><option value={2}>2 emails at a time</option><option value={3}>3 emails at a time</option></select><small>Emails in one batch are submitted together.</small></label>
+                        <label><span>Gap between batches</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={3}>3 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. The global minimum and sending hours always apply.</small></label>
                         <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is currently active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery even after this dashboard is closed."}</small></span></label>
                         <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
                       </div>
@@ -1277,12 +1352,12 @@ Please let me know a suitable time to connect.`,
               </article>
 
               <article className="panel settings-section">
-                <div className="settings-section-heading"><div><span className="settings-number">3</span><div><p className="eyebrow">Delivery guardrails</p><h2>Control when and how fast emails can send</h2><p>All times use Asia/Kolkata. These limits apply to client delivery, not test previews.</p></div></div></div>
+                <div className="settings-section-heading"><div><span className="settings-number">3</span><div><p className="eyebrow">Delivery guardrails</p><h2>Control when and how fast emails can send</h2><p>All times use Asia/Kolkata. Pause and daily limits protect every client campaign; spacing and sending hours control scheduled delivery. Test previews are excluded.</p></div></div></div>
                 <form className="safety-form" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}>
-                  <label><span>Daily sending limit</span><input disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="1000" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
-                  <label><span>Minimum spacing</span><div className="input-suffix"><input disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" defaultValue={control?.settings?.minimum_delay_minutes || 5} /><b>minutes</b></div><small>Delay between consecutive emails</small></label>
-                  <label><span>Sending starts</span><input disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /><small>Earliest allowed delivery</small></label>
-                  <label><span>Sending ends</span><input disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /><small>Latest allowed delivery</small></label>
+                  <label><span>Daily sending limit</span><input required disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="1000" step="1" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
+                  <label><span>Minimum batch gap</span><div className="input-suffix"><input required disabled={!control?.canManage || working} name="delay" type="number" min="1" max="60" step="1" defaultValue={control?.settings?.minimum_delay_minutes || 5} /><b>minutes</b></div><small>Campaigns cannot schedule a smaller gap</small></label>
+                  <label><span>Scheduled sending starts</span><input required disabled={!control?.canManage || working} name="windowStart" type="time" defaultValue={control?.settings?.sending_window_start || "10:00"} /><small>Earliest allowed scheduled delivery</small></label>
+                  <label><span>Scheduled sending ends</span><input required disabled={!control?.canManage || working} name="windowEnd" type="time" defaultValue={control?.settings?.sending_window_end || "17:00"} /><small>Latest allowed scheduled delivery</small></label>
                   <label className={`pause-control ${paused ? "selected" : ""}`}><input disabled={!control?.canManage || working} name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span><strong>Pause all client sending</strong><small>Recommended while campaigns are being prepared or reviewed.</small></span></label>
                   <div className="safety-actions"><div><strong>{control?.canManage ? "Changes apply immediately after saving." : "Sign in with an authorized IKF account to change controls."}</strong><span>Manual approval remains mandatory in both states.</span></div><button disabled={!control?.canManage || working} className="primary-action">{working ? "Saving…" : "Save delivery controls"}</button></div>
                 </form>

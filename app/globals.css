@@ -272,10 +272,12 @@ tbody tr:hover { background: #f7f8ff; }
 .studio-actions > div { display: grid; gap: 2px; }
 .studio-actions span { color: var(--muted); }
 .studio-actions .primary-action { padding-inline: 20px; }
-.campaign-creation-actions { padding-top: 18px; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(240px, .72fr) minmax(0, 1.28fr); gap: 18px; align-items: end; }
+.campaign-creation-actions { padding-top: 18px; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(400px, 1fr) minmax(0, 1fr); gap: 18px; align-items: end; }
+.campaign-identity-fields { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .campaign-sender-field { display: grid; gap: 7px; }
 .campaign-sender-field > span { color: #414b56; font-weight: 800; }
-.campaign-sender-field select { min-height: 46px; width: 100%; padding: 10px 12px; border: 1px solid #d7dce2; border-radius: 10px; background: #fff; color: var(--ink); font-size: 15px; }
+.campaign-sender-field select, .campaign-sender-field input { min-height: 46px; width: 100%; padding: 10px 12px; border: 1px solid #d7dce2; border-radius: 10px; background: #fff; color: var(--ink); font-size: 15px; }
+.campaign-sender-field select:focus, .campaign-sender-field input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .campaign-sender-field small { color: var(--muted); line-height: 1.4; }
 .campaign-paths { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; }
 .campaign-paths > div { display: grid; gap: 3px; }
@@ -306,6 +308,10 @@ tbody tr:hover { background: #f7f8ff; }
 .background-job-list article small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .background-job-list article i { height: 7px; border-radius: 99px; background: #e7e4ff; overflow: hidden; }
 .background-job-list article i b { height: 100%; border-radius: inherit; background: var(--accent); display: block; transition: width .3s ease; }
+.background-job-actions { display: flex; align-items: center; gap: 9px; }
+.background-job-actions button { min-height: 38px; padding: 8px 12px; border: 1px solid #e3a8b2; border-radius: 9px; background: #fff7f8; color: #a23c4d; font-weight: 800; cursor: pointer; }
+.background-job-actions button:hover { background: #ffedf0; }
+.background-job-actions button:disabled { opacity: .45; cursor: default; }
 
 @media (max-width: 1100px) {
   .bulk-panel, .danger-panel { grid-template-columns: 1fr 1fr; }
@@ -571,6 +577,10 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .campaign-recipient-list > div > span { min-width: 0; display: grid; gap: 2px; }
 .campaign-recipient-list strong, .campaign-recipient-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-recipient-list small { color: var(--muted); }
+.campaign-recipient-list .campaign-recipient-actions { min-width: auto; display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.delete-email-action { min-height: 34px; padding: 6px 10px; border: 1px solid #e8b7bf; border-radius: 8px; background: #fff7f8; color: #a3273b; font-weight: 800; cursor: pointer; }
+.delete-email-action:hover:not(:disabled) { background: #fdecef; border-color: #d98c99; }
+.delete-email-action:disabled { opacity: .45; cursor: not-allowed; }
 .campaign-recipient-list > button { width: 100%; min-height: 46px; border: 0; background: #f7f5ff; color: var(--accent); font-weight: 800; cursor: pointer; }
 .campaign-approval-box { min-height: 150px; padding: 20px; border: 1px solid #dedaf8; border-radius: 12px; background: #fff; display: grid; align-content: center; gap: 20px; text-align: center; }
 .campaign-approval-box > div { display: grid; gap: 3px; }
@@ -580,7 +590,7 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .campaign-delivery-choice { margin: 0 0 14px 44px; padding: 5px; border: 1px solid #dcd8ff; border-radius: 11px; background: #f4f2ff; display: inline-grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .campaign-delivery-choice button { min-height: 40px; padding: 8px 14px; border: 0; border-radius: 8px; background: transparent; color: #5b6470; font-weight: 800; }
 .campaign-delivery-choice button.active { background: #fff; color: var(--accent); box-shadow: 0 2px 8px rgba(54, 43, 148, .12); }
-.campaign-schedule-form { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.campaign-schedule-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .campaign-schedule-form > label:not(.campaign-confirm) { padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: #fff; display: grid; gap: 7px; }
 .campaign-schedule-form label > span { font-size: 14px; font-weight: 800; }
 .campaign-schedule-form input[type="datetime-local"], .campaign-schedule-form select { width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid #d8dde3; border-radius: 10px; background: #fff; color: var(--ink); font-size: 15px; }
@@ -717,7 +727,7 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
   .campaign-paths button { width: 100%; }
   .background-job-list { padding-inline: 14px; }
   .background-job-list article { grid-template-columns: auto minmax(0, 1fr); }
-  .background-job-list article > .status-pill { grid-column: 2; justify-self: start; }
+  .background-job-actions { grid-column: 2; justify-self: start; flex-wrap: wrap; }
   .app-shell { width: 100%; grid-template-columns: minmax(0, 1fr); overflow-x: hidden; }
   .sidebar, main, .content { min-width: 0; width: 100%; max-width: 100%; }
   .campaign-setup-grid { grid-template-columns: 1fr; }
@@ -798,6 +808,7 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 }
 
 @media (max-width: 560px) {
+  .campaign-identity-fields { grid-template-columns: 1fr; }
   .email-filter-group { grid-template-columns: 1fr; }
   .campaign-picker-grid { grid-template-columns: 1fr; }
   .campaign-stat-strip { grid-template-columns: 1fr; }

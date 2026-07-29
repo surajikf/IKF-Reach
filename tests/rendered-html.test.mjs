@@ -36,3 +36,30 @@ test("contacts and companies paginate their complete filtered datasets independe
   assert.match(page, /Showing.*contacts/);
   assert.match(page, /Showing.*companies/);
 });
+
+test("campaigns store a chosen Reply-To and support controlled delivery batches", () => {
+  assert.match(page, /Reply-To email/);
+  assert.match(page, /Enter another email/);
+  assert.match(page, /Emails in each batch/);
+  assert.match(page, /Gap between batches/);
+  assert.match(api, /saveCampaignReplyTo/);
+  assert.match(api, /replyToForMail/);
+  assert.match(api, /buildCampaignSchedule\(start, mails\.length, batchSize, delayMinutes, policy\)/);
+});
+
+test("authorized operators can stop durable background research safely", () => {
+  assert.match(page, /Stop processing/);
+  assert.match(page, /stopBackgroundJob/);
+  assert.match(api, /cancel_background_campaign/);
+  assert.match(api, /SET status = 'cancelled'/);
+  assert.match(api, /assertBackgroundJobActive/);
+  assert.match(worker, /if \(!result\.remaining\) return/);
+});
+
+test("campaign audience permits safe deletion of unsent generated emails only", () => {
+  assert.match(page, /deleteCampaignEmail/);
+  assert.match(page, /Delete this generated email/);
+  assert.match(api, /delete_generated_email/);
+  assert.match(api, /Sent or scheduled emails cannot be deleted/);
+  assert.match(api, /generated_email_deleted/);
+});
