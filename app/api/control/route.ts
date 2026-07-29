@@ -1574,7 +1574,7 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
   // Large imports can start with high-throughput batches, but the final/retry
   // tail uses smaller batches so one expensive record cannot exhaust the
   // Cloudflare Worker CPU allowance and stall the whole campaign.
-  const batchLimit = estimatedRemaining > 200 ? 50 : estimatedRemaining > 50 ? 20 : 4;
+  const batchLimit = estimatedRemaining > 200 ? 50 : estimatedRemaining > 50 ? 20 : 1;
   await queueDb.prepare(`
     UPDATE background_research_items
     SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'queued' END,
