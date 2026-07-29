@@ -1341,7 +1341,7 @@ Please let me know a suitable time to connect.`,
                       <button type="button" className="website-scan-button" disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>{scanningWebsites ? "Scanning websites…" : "Find public email addresses"}</button>
                     </div>
                     <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
-                      <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB</small>
+                      <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB. Every valid contact is queued in safe background batches.</small>
                       <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
                       <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
                     </label>

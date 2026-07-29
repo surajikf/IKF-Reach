@@ -23,7 +23,16 @@ test("server queues campaign sources and processes them in bounded batches", () 
   assert.match(api, /process_background_campaign/);
   assert.match(api, /LIMIT 3/);
   assert.match(api, /suppliedWebsites\.length > 50/);
+  assert.doesNotMatch(api, /parsedContacts\.length > 50/);
+  assert.doesNotMatch(api, /\.slice\(0, 120_000\)/);
+  assert.match(api, /offset \+= 75/);
   assert.match(api, /selectVerifiedSender/);
+});
+
+test("contact documents queue every valid record and retain PDF organization context", () => {
+  assert.match(page, /Every valid contact is queued in safe background batches/);
+  assert.match(api, /parseDocumentContactInput\(documentText\)/);
+  assert.match(api, /mergeContactInputs/);
 });
 
 test("worker continues campaign research independently of the browser", () => {

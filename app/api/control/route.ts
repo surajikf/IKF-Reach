@@ -3,6 +3,11 @@ import { getQueueDb } from "../../../db";
 import { buildCampaignSchedule, insideIndiaWindow } from "../../lib/schedule";
 import { inferContactName } from "../../lib/name";
 import {
+  mergeContactInputs,
+  parseContactInput,
+  parseDocumentContactInput,
+} from "../../lib/contact-input";
+import {
   cleanPersonalizedSubject,
   hasPersonalizationPlaceholder,
   renderPersonalizedSubject,
@@ -299,7 +304,10 @@ export async function POST(req: NextRequest) {
       if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
 
       const documentText = body.document ? await extractDocumentText(body.document) : "";
-      const parsedContacts = parseContactInput(`${String(body.rawInput || "")}\n${documentText}`.trim());
+      const parsedContacts = mergeContactInputs(
+        parseContactInput(String(body.rawInput || "")),
+        parseDocumentContactInput(documentText),
+      );
       const suppliedWebsites = extractWebsites(String(body.websites || ""));
       if (!parsedContacts.length && !suppliedWebsites.length) {
         return NextResponse.json({ ok: false, error: "Paste contacts, enter company websites, or upload a supported document." }, { status: 400 });
@@ -307,10 +315,6 @@ export async function POST(req: NextRequest) {
       if (suppliedWebsites.length > 50) {
         return NextResponse.json({ ok: false, error: "Add up to 50 company websites to one campaign." }, { status: 400 });
       }
-      if (parsedContacts.length > 50) {
-        return NextResponse.json({ ok: false, error: "Add up to 50 known contacts to one campaign." }, { status: 400 });
-      }
-
       const selectedSender = await selectVerifiedSender(body.senderEmail);
       const selectedReplyTo = normalizedReplyTo(body.replyToEmail, selectedSender.email);
       const campaign = await ensureCampaign(campaignName, "researching", selectedSender);
@@ -441,8 +445,10 @@ export async function POST(req: NextRequest) {
       if (!emailTemplate) return NextResponse.json({ ok: false, error: "Paste the email template to personalize for this campaign." }, { status: 400 });
       if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
       const documentText = body.document ? await extractDocumentText(body.document) : "";
-      const rawInput = `${String(body.rawInput || "")}\n${documentText}`.trim();
-      const parsedContacts = parseContactInput(rawInput);
+      const parsedContacts = mergeContactInputs(
+        parseContactInput(String(body.rawInput || "")),
+        parseDocumentContactInput(documentText),
+      );
       const suppliedWebsites = extractWebsites(String(body.websites || ""));
       if (!parsedContacts.length && !suppliedWebsites.length) {
         return NextResponse.json({ ok: false, error: "Paste contacts, enter a website, or upload a supported document." }, { status: 400 });
@@ -1472,20 +1478,29 @@ async function queueBackgroundCampaign(input: {
       payload: JSON.stringify({ ...contact, industry: input.industry || "" }),
     })),
   ];
-  await queueDb.batch([
-    queueDb.prepare(`
+  await queueDb.prepare(`
       INSERT INTO background_research_jobs (
         id, campaign_id, campaign_name, topic, email_template, brief, created_by,
         status, total_items, completed_items, successful_items, failed_items,
         drafts_created, contacts_found, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, ?, ?)
-    `).bind(id, input.campaignId, input.campaignName, input.topic, input.emailTemplate, input.brief || null, input.user, items.length, now, now),
-    ...items.map((item) => queueDb.prepare(`
-      INSERT INTO background_research_items (
-        id, job_id, input_type, input_value, payload, status, attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
-    `).bind(item.id, id, item.type, item.value, item.payload, now, now)),
-  ]);
+    `).bind(id, input.campaignId, input.campaignName, input.topic, input.emailTemplate, input.brief || null, input.user, items.length, now, now).run();
+  try {
+    for (let offset = 0; offset < items.length; offset += 75) {
+      const batch = items.slice(offset, offset + 75);
+      await queueDb.batch(batch.map((item) => queueDb.prepare(`
+        INSERT INTO background_research_items (
+          id, job_id, input_type, input_value, payload, status, attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+      `).bind(item.id, id, item.type, item.value, item.payload, now, now)));
+    }
+  } catch (error) {
+    await queueDb.batch([
+      queueDb.prepare("DELETE FROM background_research_items WHERE job_id = ?").bind(id),
+      queueDb.prepare("DELETE FROM background_research_jobs WHERE id = ?").bind(id),
+    ]);
+    throw error;
+  }
   return {
     id,
     campaignId: input.campaignId,
@@ -2141,24 +2156,6 @@ function isPublicMailbox(domain: string) {
   return new Set(["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "rediffmail.com", "icloud.com", "proton.me", "protonmail.com"]).has(domain.toLowerCase());
 }
 
-function parseContactInput(text: string) {
-  const contacts: Array<{ email: string; name: string; company?: string; website?: string; research?: WebsiteResearch }> = [];
-  for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-    const emails = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
-    const website = extractWebsites(line)[0];
-    for (const rawEmail of emails) {
-      const email = rawEmail.toLowerCase();
-      const angleName = line.match(new RegExp(`^\\s*([^<,;]+)\\s*<\\s*${escapeRegExp(rawEmail)}`, "i"))?.[1]?.trim() || "";
-      const fields = line.split(/[,;\t]/).map((item) => item.trim()).filter(Boolean);
-      const nonEmailFields = fields.filter((item) => !item.includes("@") && !/^https?:\/\//i.test(item));
-      const name = angleName || (nonEmailFields.length ? nonEmailFields[0] : "");
-      const company = nonEmailFields.length > 1 ? nonEmailFields[1] : undefined;
-      if (!contacts.some((item) => item.email === email)) contacts.push({ email, name, company, website });
-    }
-  }
-  return contacts;
-}
-
 function extractWebsites(text: string) {
   const websites: string[] = [];
   const matches = String(text || "").match(/(?:https?:\/\/|www\.)[^\s,;<>"']+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:\/[^\s,;<>"']*)?/gi) || [];
@@ -2258,16 +2255,16 @@ async function extractDocumentText(document: Record<string, any>) {
     const { extractText, getDocumentProxy } = await import("unpdf");
     const pdf = await getDocumentProxy(bytes);
     const result = await extractText(pdf, { mergePages: true });
-    return String(result.text || "").slice(0, 120_000);
+    return String(result.text || "");
   }
   if (name.endsWith(".docx")) {
     const { unzipSync, strFromU8 } = await import("fflate");
     const files = unzipSync(bytes);
     const xml = files["word/document.xml"];
     if (!xml) throw new Error("The DOCX file does not contain readable document text.");
-    return decodeEntities(strFromU8(xml).replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, "")).slice(0, 120_000);
+    return decodeEntities(strFromU8(xml).replace(/<w:tab\/>/g, "\t").replace(/<\/w:p>/g, "\n").replace(/<[^>]+>/g, ""));
   }
-  if (/\.(txt|csv|tsv)$/i.test(name)) return new TextDecoder().decode(bytes).slice(0, 120_000);
+  if (/\.(txt|csv|tsv)$/i.test(name)) return new TextDecoder().decode(bytes);
   throw new Error("Supported documents are PDF, DOCX, CSV, TSV, and TXT.");
 }
 
