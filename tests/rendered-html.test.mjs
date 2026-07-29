@@ -22,7 +22,8 @@ test("campaign creation exposes durable background research and verified sender 
 test("server queues campaign sources and processes them in bounded batches", () => {
   assert.match(api, /queue_background_campaign/);
   assert.match(api, /process_background_campaign/);
-  assert.match(api, /LIMIT 12/);
+  assert.match(api, /const batchLimit = estimatedRemaining > 200 \? 50 : estimatedRemaining > 50 \? 25 : 12/);
+  assert.match(api, /LIMIT \?/);
   assert.match(api, /suppliedWebsites\.length > 50/);
   assert.doesNotMatch(api, /parsedContacts\.length > 50/);
   assert.doesNotMatch(api, /\.slice\(0, 120_000\)/);

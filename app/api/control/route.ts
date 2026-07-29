@@ -1539,6 +1539,11 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
   const now = new Date();
   const nowIso = now.toISOString();
   const staleBefore = new Date(now.getTime() - 5 * 60_000).toISOString();
+  const estimatedRemaining = Math.max(
+    0,
+    Number(job.total_items || 0) - Number(job.completed_items || 0),
+  );
+  const batchLimit = estimatedRemaining > 200 ? 50 : estimatedRemaining > 50 ? 25 : 12;
   await queueDb.prepare(`
     UPDATE background_research_items
     SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'queued' END,
@@ -1552,8 +1557,8 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     SELECT * FROM background_research_items
     WHERE job_id = ? AND status = 'queued'
     ORDER BY created_at ASC
-    LIMIT 12
-  `).bind(jobId).all();
+    LIMIT ?
+  `).bind(jobId, batchLimit).all();
   const claimId = crypto.randomUUID();
   const candidates = (queued.results || []) as Array<Record<string, any>>;
   if (candidates.length) {
