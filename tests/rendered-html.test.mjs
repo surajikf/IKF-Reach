@@ -25,6 +25,8 @@ test("server queues campaign sources and processes them in bounded batches", () 
   assert.match(api, /const batchLimit = estimatedRemaining > 200 \? 50 : estimatedRemaining > 50 \? 20 : 1/);
   assert.match(api, /now\.getTime\(\) - 45_000/);
   assert.match(api, /status = 'failed' AND attempts < 2/);
+  assert.match(api, /skipDomainResearch: Number\(item\.attempts \|\| 0\) >= 2/);
+  assert.match(api, /!research && inferredWebsite && !input\.skipDomainResearch/);
   assert.match(api, /AS retrying/);
   assert.match(api, /LIMIT \?/);
   assert.match(api, /suppliedWebsites\.length > 50/);

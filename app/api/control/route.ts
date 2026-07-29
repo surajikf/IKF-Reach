@@ -1764,7 +1764,13 @@ async function processBackgroundResearchItem(item: Record<string, any>, job: Rec
     skipExistingCampaignContact: true,
   };
   if (item.input_type === "contact") {
-    const created = await createDraftRecord({ ...payload, ...common }, String(job.created_by || "background-worker"));
+    const created = await createDraftRecord({
+      ...payload,
+      ...common,
+      // A final retry must still produce the draft when the recipient's
+      // website is unusually expensive or blocks automated research.
+      skipDomainResearch: Number(item.attempts || 0) >= 2,
+    }, String(job.created_by || "background-worker"));
     return {
       contactsFound: 1,
       draftsCreated: created.skipped ? 0 : 1,
@@ -1907,7 +1913,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   const emailDomain = email.split("@")[1];
   const inferredWebsite = input.website || (!isPublicMailbox(emailDomain) ? `https://${emailDomain}` : "");
   let research: WebsiteResearch | null = input.research || null;
-  if (!research && inferredWebsite) {
+  if (!research && inferredWebsite && !input.skipDomainResearch) {
     try { research = await researchWebsite(inferredWebsite); } catch {}
   }
   const companyName = String(input.company || research?.companyName || companyFromDomain(emailDomain)).trim();
