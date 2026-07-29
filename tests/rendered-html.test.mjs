@@ -98,6 +98,7 @@ test("statistics formulas and exports distinguish unique and total engagement", 
 test("Brevo webhook events are authenticated, deduplicated, and stored durably", () => {
   assert.match(webhookApi, /BREVO_WEBHOOK_TOKEN/);
   assert.match(webhookApi, /Bearer /);
+  assert.match(webhookApi, /x-brevo-webhook-token/);
   assert.match(webhookApi, /INSERT OR IGNORE INTO email_analytics_events/);
   assert.match(webhookApi, /providerEventKey|provider_event_key/);
   assert.match(statisticsApi, /canonicalEventKey/);

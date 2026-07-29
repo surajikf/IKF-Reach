@@ -60,7 +60,8 @@ export async function POST(req: NextRequest) {
     const suppliedToken = req.nextUrl.searchParams.get("token");
     const authorization = req.headers.get("authorization");
     const bearerToken = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
-    if (!configuredToken || (suppliedToken !== configuredToken && bearerToken !== configuredToken)) {
+    const headerToken = req.headers.get("x-brevo-webhook-token") || "";
+    if (!configuredToken || (suppliedToken !== configuredToken && bearerToken !== configuredToken && headerToken !== configuredToken)) {
       return NextResponse.json({ ok: false, error: "Invalid webhook token." }, { status: 401 });
     }
     const body = await req.json();
