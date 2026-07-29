@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const api = await readFile(new URL("../app/api/control/route.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
 const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
@@ -171,4 +172,10 @@ test("company cards expose the full clickable website URL", () => {
   assert.match(page, /function fullWebsiteUrl/);
   assert.match(page, /className="company-website-url"/);
   assert.doesNotMatch(page, />Visit website</);
+});
+
+test("campaign directory uses the full workspace with a responsive card grid", () => {
+  assert.match(css, /\.campaign-portfolio-layout \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(css, /\.campaign-directory-list \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 1280px\)[\s\S]*\.campaign-directory-list \{ grid-template-columns: 1fr; \}/);
 });
