@@ -327,7 +327,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     URL.revokeObjectURL(url);
   }
 
-  if (loading && !data) return <section className="panel statistics-loading"><span className="statistics-spinner" /><h2>Loading Brevo statistics</h2><p>Matching delivery events to IKF campaigns and recipients…</p></section>;
+  if (loading && !data) return <section className="panel statistics-loading compact-statistics-loading" role="status"><div><span className="statistics-spinner" /><div><h2>Loading campaign statistics</h2><p>Matching Brevo delivery events to campaigns and recipients.</p></div></div><div className="statistics-skeleton-row"><i /><i /><i /><i /></div></section>;
 
   return (
     <div className="statistics-module">

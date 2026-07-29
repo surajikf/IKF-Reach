@@ -265,8 +265,13 @@ export default function Home() {
   const [campaignDeleteId, setCampaignDeleteId] = useState<string | null>(null);
   const [campaignDeleteConfirm, setCampaignDeleteConfirm] = useState("");
   const [contactPageSize, setContactPageSize] = useState(50);
+  const [companyPageSize, setCompanyPageSize] = useState(18);
   const [contactIndustry, setContactIndustry] = useState("all");
   const [companyIndustry, setCompanyIndustry] = useState("all");
+  const [companyView, setCompanyView] = useState<"cards" | "table">("cards");
+  const [activityFilter, setActivityFilter] = useState("all");
+  const [settingsView, setSettingsView] = useState<"connections" | "workflow" | "delivery">("connections");
+  const [accessBannerExpanded, setAccessBannerExpanded] = useState(false);
   const [validationData, setValidationData] = useState<ValidationData | null>(null);
   const [validationFilter, setValidationFilter] = useState<"all" | ValidationVerdict | "unchecked">("all");
   const [validationPanelOpen, setValidationPanelOpen] = useState(false);
@@ -274,7 +279,6 @@ export default function Home() {
   const [validationScheduledFor, setValidationScheduledFor] = useState("");
   const backgroundKickoffsRef = useRef(new Map<string, number>());
   const pageSize = 20;
-  const companyPageSize = 18;
 
   async function loadControl() {
     setRefreshing(true);
@@ -494,6 +498,18 @@ export default function Home() {
   const companyPages = Math.max(1, Math.ceil(filteredCompanies.length / companyPageSize));
   const safeCompanyPage = Math.min(companyPage, companyPages);
   const pagedCompanies = filteredCompanies.slice((safeCompanyPage - 1) * companyPageSize, safeCompanyPage * companyPageSize);
+  const activityTypes = useMemo(
+    () => [...new Set(displayActivity.map((item) => item.action).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [displayActivity],
+  );
+  const filteredActivity = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return displayActivity.filter((item) => {
+      const matchesType = activityFilter === "all" || item.action === activityFilter;
+      const haystack = `${prettyStatus(item.action)} ${item.company || ""} ${item.email || ""}`.toLowerCase();
+      return matchesType && (!term || haystack.includes(term));
+    });
+  }, [displayActivity, activityFilter, search]);
   const stats = useMemo<LiveStats>(() => control?.liveStats || {
     companies: data.summary.companies,
     contacts: data.summary.contacts,
@@ -629,6 +645,17 @@ export default function Home() {
   const pagedEmails = filteredEmails.slice((page - 1) * pageSize, page * pageSize);
   const pages = Math.max(1, Math.ceil(filteredEmails.length / pageSize));
   const pageTitle = navItems.find((item) => item.id === section)?.label || "Overview";
+  const searchPlaceholder = section === "contacts"
+    ? "Search contacts, emails, companies"
+    : section === "companies"
+      ? "Search companies, industries, websites"
+      : section === "campaigns"
+        ? "Search campaigns and recipients"
+        : section === "activity"
+          ? "Search activity"
+          : section === "statistics"
+            ? "Search analytics"
+            : "Search workspace";
 
   useEffect(() => {
     if (page > pages) setPage(pages);
@@ -1097,7 +1124,7 @@ export default function Home() {
           <div className="top-actions">
             <label className="global-search">
               <span aria-hidden="true">⌕</span>
-              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setContactPage(1); setCompanyPage(1); }} placeholder="Search records" aria-label="Search records" />
+              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setContactPage(1); setCompanyPage(1); }} placeholder={searchPlaceholder} aria-label={searchPlaceholder} />
             </label>
             <button className="refresh-button" onClick={loadControl} disabled={refreshing} aria-label="Refresh live dashboard data">{refreshing ? "Refreshing…" : "Refresh"}</button>
             <div className="avatar" aria-label="Tanishka">T</div>
@@ -1112,9 +1139,9 @@ export default function Home() {
             <section className="system-banner error-banner" role="alert"><div><strong>Live data is temporarily unavailable</strong><p>{control.error || "Please try the connection again."}</p></div><button onClick={loadControl}>Retry</button></section>
           )}
           {control?.ok && !control.canManage && (
-            <section className="access-banner">
-              <div><strong>Public view · sending controls are locked</strong><p>Sign in with an authorized IKF account to approve, schedule, cancel, or send emails.</p></div>
-              <a href="/signin-with-chatgpt?return_to=%2F">Sign in to manage</a>
+            <section className={`access-banner compact-access-banner ${accessBannerExpanded ? "expanded" : ""}`}>
+              <div><strong>Public view · sending is locked</strong>{accessBannerExpanded && <p>Sign in with an authorized IKF account to approve, schedule, cancel, or send emails.</p>}</div>
+              <div className="access-banner-actions"><button type="button" onClick={() => setAccessBannerExpanded((value) => !value)}>{accessBannerExpanded ? "Less" : "Why?"}</button><a href="/signin-with-chatgpt?return_to=%2F">Sign in</a></div>
             </section>
           )}
           {section === "overview" && (
@@ -1130,6 +1157,16 @@ export default function Home() {
                 <Metric label="Needs review" value={stats.pendingReview} note="Before approval or scheduling" tone="amber" />
                 <Metric label="All database contacts" value={stats.contacts} note={`${stats.companies} companies across every campaign`} tone="blue" />
                 <Metric label="Successful sends" value={stats.sent} note={`${stats.failed} failed attempts recorded`} tone="green" />
+              </section>
+
+              <section className="overview-command-bar" aria-label="Quick actions">
+                <div><p className="eyebrow">Command centre</p><strong>Choose your next action</strong></div>
+                <div>
+                  <button className="primary-action" onClick={() => switchSection("create")}>Create campaign</button>
+                  <button className="quiet-action" onClick={() => switchSection("contacts")}>Validate contacts</button>
+                  <button className="quiet-action" onClick={() => switchSection("campaigns")}>Review campaigns</button>
+                  <button className="quiet-action" onClick={() => switchSection("statistics")}>View results</button>
+                </div>
               </section>
 
               <section className="overview-grid">
@@ -1555,10 +1592,10 @@ export default function Home() {
               <article className="panel intelligence-studio">
                 <div className="studio-hero">
                   <div><p className="eyebrow">Research · enrich · personalize</p><h2>Outreach Intelligence Studio</h2><p>Bring whatever you have. The studio extracts contacts, researches company websites, discovers public email addresses, and creates review-ready drafts.</p></div>
-                  <div className="studio-steps"><span>1 · Add sources</span><span>2 · Research</span><span>3 · Review drafts</span></div>
+                  <nav className="studio-steps" aria-label="Campaign creation steps"><a href="#campaign-setup">1 · Campaign</a><a href="#campaign-audience">2 · Audience</a><a href="#campaign-launch">3 · Review & create</a></nav>
                 </div>
                 <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
-                  <div className="campaign-setup-grid">
+                  <div className="campaign-setup-grid" id="campaign-setup">
                     <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
                     <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {ASSOCIATION NAME} - AI Native Thinking Masterclass" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
                   </div>
@@ -1574,6 +1611,7 @@ export default function Home() {
                     />
                     <small>Use the <strong>Personalize</strong> menu to insert contact, company, research, topic, industry, website, or focus-area fields. Formatting around each field is preserved in every generated email. Missing values and curly brackets are removed safely before review or delivery.</small>
                   </section>
+                  <div className="studio-section-heading" id="campaign-audience"><span>2</span><div><strong>Add your audience</strong><small>Paste contacts, scan websites, or upload a document. New addresses are validated before drafts are created.</small></div></div>
                   <div className="source-grid">
                     <label className="source-card">
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
@@ -1613,6 +1651,7 @@ export default function Home() {
                     </section>
                   )}
                   <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
+                  <div className="studio-section-heading" id="campaign-launch"><span>3</span><div><strong>Review campaign settings</strong><small>Confirm the sender, Reply-To inbox, and what should happen next.</small></div></div>
                   <section className="campaign-creation-actions">
                     <div className="campaign-identity-fields">
                       <label className="campaign-sender-field">
@@ -1730,7 +1769,13 @@ export default function Home() {
                 <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </article>
 
-              <article className="panel settings-section">
+              <nav className="settings-tabbar" aria-label="Control centre sections">
+                <button className={settingsView === "connections" ? "active" : ""} onClick={() => setSettingsView("connections")}>1. Connections</button>
+                <button className={settingsView === "workflow" ? "active" : ""} onClick={() => setSettingsView("workflow")}>2. Workflow</button>
+                <button className={settingsView === "delivery" ? "active" : ""} onClick={() => setSettingsView("delivery")}>3. Delivery limits</button>
+              </nav>
+
+              <article className={`panel settings-section ${settingsView === "connections" ? "" : "settings-section-hidden"}`}>
                 <div className="settings-section-heading"><div><span className="settings-number">1</span><div><p className="eyebrow">System readiness</p><h2>Connections and sending identity</h2><p>These services must be available before any delivery action can work.</p></div></div><button onClick={loadControl} disabled={refreshing}>{refreshing ? "Checking…" : "Check connections"}</button></div>
                 <div className="connection-cards">
                   <div><span className={`api-dot ${control?.providers?.database ? "online" : "offline"}`} /><div><strong>Supabase database</strong><small>Contacts, companies, campaigns, drafts, and activity</small></div><b>{control?.providers?.database ? "Connected" : "Unavailable"}</b></div>
@@ -1739,7 +1784,7 @@ export default function Home() {
                 </div>
               </article>
 
-              <article className="panel settings-section">
+              <article className={`panel settings-section ${settingsView === "workflow" ? "" : "settings-section-hidden"}`}>
                 <div className="settings-section-heading"><div><span className="settings-number">2</span><div><p className="eyebrow">Process flow</p><h2>How an email moves through the system</h2><p>Every step is visible and reviewable. Nothing bypasses approval.</p></div></div></div>
                 <ol className="sending-flow">
                   <li><span>1</span><div><strong>Create campaign drafts</strong><p>Add recipients, research sources, and your template. Drafts are grouped by campaign.</p></div></li>
@@ -1749,7 +1794,7 @@ export default function Home() {
                 </ol>
               </article>
 
-              <article className="panel settings-section">
+              <article className={`panel settings-section ${settingsView === "delivery" ? "" : "settings-section-hidden"}`}>
                 <div className="settings-section-heading"><div><span className="settings-number">3</span><div><p className="eyebrow">Delivery guardrails</p><h2>Control when and how fast emails can send</h2><p>All times use Asia/Kolkata. Pause and daily limits protect every client campaign; spacing and sending hours control scheduled delivery. Test previews are excluded.</p></div></div></div>
                 <form className="safety-form" onSubmit={(e) => { e.preventDefault(); const form = new FormData(e.currentTarget); runAction({ action: "policy", dailyLimit: form.get("dailyLimit"), delay: form.get("delay"), windowStart: form.get("windowStart"), windowEnd: form.get("windowEnd"), paused: form.get("paused") === "on" }, "Safety settings saved."); }}>
                   <label><span>Daily sending limit</span><input required disabled={!control?.canManage || working} name="dailyLimit" type="number" min="1" max="1000" step="1" defaultValue={control?.settings?.daily_limit || 25} /><small>Maximum client emails per day</small></label>
@@ -1766,7 +1811,7 @@ export default function Home() {
           {section === "contacts" && (
             <section className="panel data-panel">
               <div className="panel-heading">
-                <div><p className="eyebrow">Audience safety</p><h2>{displayContacts.length} contacts</h2><span className="panel-subcopy">Validate before creating drafts or sending campaigns.</span></div>
+                <div><p className="eyebrow">Audience safety</p><h2>{displayContacts.length} contacts</h2><span className="panel-subcopy">{validationCounts.valid.toLocaleString("en-IN")} valid · {validationCounts.risky.toLocaleString("en-IN")} risky · {validationCounts.invalid.toLocaleString("en-IN")} quarantined</span></div>
                 <div className="contact-list-controls">
                   <label><span>Industry</span><select value={contactIndustry} onChange={(event) => { setContactIndustry(event.target.value); setContactPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label>
                   <label><span>Rows per page</span><select value={contactPageSize} onChange={(event) => { setContactPageSize(Number(event.target.value)); setContactPage(1); }}><option value={50}>50</option><option value={100}>100</option><option value={1000}>1,000</option></select></label>
@@ -1819,12 +1864,23 @@ export default function Home() {
 
               <div className="validation-policy-note"><strong>Validation-first campaign protection</strong><span>New addresses from documents, websites, or pasted lists are validated before a draft is created. Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent.</span></div>
 
-              <div className="table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
+              <div className="table-wrap contacts-table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
                   return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
                 })}
               </tbody></table></div>
+              <div className="contact-card-list">
+                {pagedContacts.map((contact) => {
+                  const validation = validationByContact.get(contact.id);
+                  return <article key={`mobile-${contact.id}`} className={validation?.verdict === "invalid" ? "contact-mobile-card quarantined-row" : "contact-mobile-card"}>
+                    <div className="contact-mobile-heading"><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} /></div>
+                    <dl><div><dt>Company</dt><dd>{contact.company}</dd></div><div><dt>Industry</dt><dd>{contact.industry || "Not classified"}</dd></div><div><dt>Confidence</dt><dd><StatusPill value={contact.confidence} /></dd></div></dl>
+                    {validation?.reasons?.[0] && <p className="validation-reason">{validation.reasons[0]}</p>}
+                    <button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)}>Edit contact</button>
+                  </article>;
+                })}
+              </div>
               {!pagedContacts.length && <div className="empty-state">{validationFilter === "invalid" ? "No quarantined contacts." : "No contacts match your filters."}</div>}
               <div className="pagination">
                 <span>{filteredContacts.length ? `Showing ${(safeContactPage - 1) * contactPageSize + 1}–${Math.min(safeContactPage * contactPageSize, filteredContacts.length)} of ${filteredContacts.length} contacts` : "0 contacts"} · Page {safeContactPage} of {contactPages}</span>
@@ -1835,13 +1891,17 @@ export default function Home() {
 
           {section === "companies" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><div className="contact-list-controls"><span>Deduplicated by domain</span><label><span>Industry</span><select value={companyIndustry} onChange={(event) => { setCompanyIndustry(event.target.value); setCompanyPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label></div></div>
-              <div className="company-grid">
+              <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2><span className="panel-subcopy">Deduplicated by website domain, with every linked contact kept under its company.</span></div><div className="contact-list-controls company-list-controls"><label><span>Industry</span><select value={companyIndustry} onChange={(event) => { setCompanyIndustry(event.target.value); setCompanyPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label><label><span>Rows</span><select value={companyPageSize} onChange={(event) => { setCompanyPageSize(Number(event.target.value)); setCompanyPage(1); }}><option value={18}>18</option><option value={50}>50</option><option value={100}>100</option></select></label><div className="view-toggle" role="group" aria-label="Company view"><button type="button" className={companyView === "cards" ? "active" : ""} onClick={() => setCompanyView("cards")}>Cards</button><button type="button" className={companyView === "table" ? "active" : ""} onClick={() => setCompanyView("table")}>Table</button></div></div></div>
+              <div className={`company-grid ${companyView === "cards" ? "" : "view-hidden"}`}>
                 {pagedCompanies.map((company) => {
                   const website = fullWebsiteUrl(company.website);
                   return <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small><div className="company-card-actions"><button type="button" onClick={() => setSelectedCompany(company)}>View contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit company</button>{website && <a className="company-website-url" href={website} target="_blank" rel="noreferrer" title={`Open ${website}`}>{website}</a>}</div></div></article>;
                 })}
               </div>
+              <div className={`table-wrap company-table-wrap ${companyView === "table" ? "" : "view-hidden"}`}><table className="company-table"><thead><tr><th>Company</th><th>Industry</th><th>Contacts</th><th>Drafts</th><th>Website</th><th>Action</th></tr></thead><tbody>{pagedCompanies.map((company) => {
+                const website = fullWebsiteUrl(company.website);
+                return <tr key={`row-${company.id}`}><td><strong>{company.name}</strong></td><td>{company.industry || "Pending verification"}</td><td>{company.contacts}</td><td>{company.drafts}</td><td>{website ? <a href={website} target="_blank" rel="noreferrer">{website}</a> : "—"}</td><td><div className="company-table-actions"><button type="button" onClick={() => setSelectedCompany(company)}>Contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit</button></div></td></tr>;
+              })}</tbody></table></div>
               {!pagedCompanies.length && <div className="empty-state">No companies match your search.</div>}
               <div className="pagination">
                 <span>{filteredCompanies.length ? `Showing ${(safeCompanyPage - 1) * companyPageSize + 1}–${Math.min(safeCompanyPage * companyPageSize, filteredCompanies.length)} of ${filteredCompanies.length} companies` : "0 companies"} · Page {safeCompanyPage} of {companyPages}</span>
@@ -1852,10 +1912,10 @@ export default function Home() {
 
           {section === "activity" && (
             <section className="panel data-panel">
-              <div className="panel-heading"><div><p className="eyebrow">Audit trail</p><h2>Recent activity</h2></div><span>Latest 100 events</span></div>
+              <div className="panel-heading"><div><p className="eyebrow">Audit trail</p><h2>Recent activity</h2><span className="panel-subcopy">Every research, approval, scheduling, delivery, and data change is traceable.</span></div><div className="activity-controls"><label><span>Event type</span><select value={activityFilter} onChange={(event) => setActivityFilter(event.target.value)}><option value="all">All events</option>{activityTypes.map((type) => <option key={type} value={type}>{prettyStatus(type)}</option>)}</select></label><span>{filteredActivity.length} events</span></div></div>
               <div className="timeline">
-                {displayActivity.map((item, index) => <div className="timeline-item" key={`${item.id || item.createdAt}-${index}`}><span className="timeline-dot" /><div><strong>{prettyStatus(item.action)}</strong><p>{item.company || item.email || "System-wide operation"}</p><small>{compactDate(item.createdAt)}</small></div></div>)}
-                {!displayActivity.length && <div className="empty-state">No activity has been recorded yet.</div>}
+                {filteredActivity.map((item, index) => <div className="timeline-item" key={`${item.id || item.createdAt}-${index}`}><span className="timeline-dot" /><div><strong>{prettyStatus(item.action)}</strong><p>{item.company || item.email || "System-wide operation"}</p><small>{new Date(item.createdAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</small></div></div>)}
+                {!filteredActivity.length && <div className="empty-state">No activity matches these filters.</div>}
               </div>
             </section>
           )}
