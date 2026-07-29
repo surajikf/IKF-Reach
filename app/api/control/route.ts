@@ -953,6 +953,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, count: ids.length });
     }
 
+    if (body.action === "approve_campaign") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) {
+        return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
+      }
+      const pending = await db(`generated_emails?select=id&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review&limit=5000`);
+      if (!pending.length) return NextResponse.json({ ok: true, count: 0 });
+      await db(`generated_emails?campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "approved" }),
+      });
+      await db("activity_log", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "campaign_drafts_approved",
+          details: { campaign_id: campaignId, approved_count: pending.length, approved_by: user },
+        }),
+      });
+      return NextResponse.json({ ok: true, count: pending.length });
+    }
+
     if (body.action === "schedule") {
       if (!body.scheduledFor) return NextResponse.json({ ok: false, error: "Choose a schedule time." }, { status: 400 });
       const scheduledAt = new Date(String(body.scheduledFor));
@@ -1383,6 +1404,13 @@ async function listBackgroundJobs() {
         completed_items AS completedItems,
         successful_items AS successfulItems,
         failed_items AS failedItems,
+        (
+          SELECT COUNT(*)
+          FROM background_research_items retry_items
+          WHERE retry_items.job_id = background_research_jobs.id
+            AND retry_items.status = 'failed'
+            AND retry_items.attempts < 2
+        ) AS retryItems,
         drafts_created AS draftsCreated,
         contacts_found AS contactsFound,
         last_error AS lastError,
@@ -1555,8 +1583,14 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
 
   const queued = await queueDb.prepare(`
     SELECT * FROM background_research_items
-    WHERE job_id = ? AND status = 'queued'
-    ORDER BY created_at ASC
+    WHERE job_id = ?
+      AND (
+        status = 'queued'
+        OR (status = 'failed' AND attempts < 2)
+      )
+    ORDER BY
+      CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
+      created_at ASC
     LIMIT ?
   `).bind(jobId, batchLimit).all();
   const claimId = crypto.randomUUID();
@@ -1565,7 +1599,11 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     await queueDb.batch(candidates.map((item) => queueDb.prepare(`
       UPDATE background_research_items
       SET status = 'researching', attempts = attempts + 1, claimed_by = ?, updated_at = ?
-      WHERE id = ? AND status = 'queued'
+      WHERE id = ?
+        AND (
+          status = 'queued'
+          OR (status = 'failed' AND attempts < 2)
+        )
     `).bind(claimId, nowIso, item.id)));
   }
   const claimedResult = await queueDb.prepare(`
@@ -1618,15 +1656,21 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     };
   }
 
-  const addedDrafts = outcomes.reduce((total, outcome) => total + (outcome.ok ? Number(outcome.result.draftsCreated || 0) : 0), 0);
-  const addedContacts = outcomes.reduce((total, outcome) => total + (outcome.ok ? Number(outcome.result.contactsFound || 0) : 0), 0);
   const countsResult = await queueDb.prepare(`
     SELECT
       COUNT(*) AS total,
-      SUM(CASE WHEN status IN ('completed', 'failed') THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE
+        WHEN status = 'completed' OR (status = 'failed' AND attempts >= 2) THEN 1
+        ELSE 0
+      END) AS completed,
       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS successful,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
-      SUM(CASE WHEN status IN ('queued', 'researching') THEN 1 ELSE 0 END) AS remaining
+      SUM(CASE WHEN status = 'failed' AND attempts >= 2 THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'failed' AND attempts < 2 THEN 1 ELSE 0 END) AS retrying,
+      SUM(CASE
+        WHEN status IN ('queued', 'researching')
+          OR (status = 'failed' AND attempts < 2) THEN 1
+        ELSE 0
+      END) AS remaining
     FROM background_research_items
     WHERE job_id = ?
   `).bind(jobId).all();
@@ -1635,8 +1679,24 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
   const completedItems = Number(counts.completed || 0);
   const successfulItems = Number(counts.successful || 0);
   const failedItems = Number(counts.failed || 0);
-  const currentDrafts = Number(job.drafts_created || 0) + addedDrafts;
-  const currentContacts = Number(job.contacts_found || 0) + addedContacts;
+  const retryItems = Number(counts.retrying || 0);
+  const completedOutcomes = await queueDb.prepare(`
+    SELECT result
+    FROM background_research_items
+    WHERE job_id = ? AND status = 'completed' AND result IS NOT NULL
+  `).bind(jobId).all();
+  const outcomeTotals = (completedOutcomes.results || []).reduce((totals, item) => {
+    try {
+      const result = JSON.parse(String((item as Record<string, any>).result || "{}"));
+      totals.drafts += Number(result.draftsCreated || 0);
+      totals.contacts += Number(result.contactsFound || 0);
+    } catch {
+      // A malformed historical result must not stop the remaining campaign.
+    }
+    return totals;
+  }, { drafts: 0, contacts: 0 });
+  const currentDrafts = outcomeTotals.drafts;
+  const currentContacts = outcomeTotals.contacts;
   const finalStatus = remaining
     ? "researching"
     : failedItems && successfulItems
@@ -1682,6 +1742,7 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     completedItems,
     successfulItems,
     failedItems,
+    retryItems,
     draftsCreated: currentDrafts,
     contactsFound: currentContacts,
   };

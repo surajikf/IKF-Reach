@@ -13,7 +13,7 @@ type CompanyRecord = { id: string; name: string; website?: string | null; indust
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
 type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
-type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
+type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; retryItems?: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
 type ControlData = {
   ok: boolean;
   canManage?: boolean;
@@ -386,6 +386,7 @@ Please let me know a suitable time to connect.`,
   const effectiveCampaignGap = Math.max(globalMinimumGap, queueForm.delayMinutes);
   const backgroundJobs = useMemo<BackgroundJob[]>(() => (control?.jobs || []) as BackgroundJob[], [control?.jobs]);
   const activeBackgroundJobs = useMemo(() => backgroundJobs.filter((job) => ["queued", "researching"].includes(job.status)), [backgroundJobs]);
+  const latestCompletedBackgroundJob = useMemo(() => backgroundJobs.find((job) => ["completed", "completed_with_issues", "failed"].includes(job.status)), [backgroundJobs]);
   const displayCampaigns = useMemo(() => Array.isArray(control?.campaigns) ? control.campaigns.map((campaign) => ({
     id: String(campaign.id || campaign.name),
     name: String(campaign.name || "Outreach"),
@@ -634,6 +635,35 @@ Please let me know a suitable time to connect.`,
       return;
     }
     await runAction({ action: "approve_batch", emailIds: ids }, `${ids.length} campaign drafts approved. Nothing has been sent.`);
+  }
+
+  function selectAllCampaignEmails() {
+    setSelectedIds(new Set(selectedCampaignEmails.map((email) => email.id)));
+  }
+
+  async function approveCampaignSelection() {
+    if (!selectedIds.size || !selectedCampaign) return;
+    const entireCampaignSelected = selectedIds.size === selectedCampaignEmails.length
+      && selectedCampaignEmails.every((email) => selectedIds.has(email.id));
+    if (entireCampaignSelected) {
+      const pendingCount = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review").length;
+      if (!pendingCount) {
+        setNoticeTone("success");
+        setNotice("Every draft in this campaign is already approved or scheduled.");
+        return;
+      }
+      if (!window.confirm(`Approve all ${pendingCount} draft emails in “${selectedCampaign.name}”?\n\nThis only changes approval status. It will not send or schedule any email.`)) return;
+      const result = await runAction(
+        { action: "approve_campaign", campaignId: selectedCampaign.id },
+        `${pendingCount} campaign drafts approved. Nothing has been sent.`,
+      );
+      if (result?.ok) setSelectedIds(new Set());
+      return;
+    }
+    await runAction(
+      { action: "approve_batch", emailIds: [...selectedIds] },
+      `${selectedIds.size} selected campaign emails approved. Nothing has been sent.`,
+    );
   }
 
   async function deleteCampaignEmail(email: EmailRecord) {
@@ -1043,6 +1073,8 @@ Please let me know a suitable time to connect.`,
                       const etaMinutes = rate ? Math.ceil(remaining / rate) : 0;
                       const activity = job.status === "queued"
                         ? "Starting secure background worker…"
+                        : Number(job.retryItems || 0) > 0
+                          ? `Retrying ${Number(job.retryItems || 0).toLocaleString("en-IN")} source record${Number(job.retryItems || 0) === 1 ? "" : "s"} after the first attempt…`
                         : etaMinutes
                           ? `About ${etaMinutes < 60 ? `${etaMinutes} min` : `${Math.ceil(etaMinutes / 60)} hr`} remaining`
                           : "Generating personalized emails…";
@@ -1066,12 +1098,29 @@ Please let me know a suitable time to connect.`,
                           <div className="background-job-metrics" aria-label="Live generation counts">
                             <span><b>{job.draftsCreated.toLocaleString("en-IN")}</b><small>Unique emails created</small></span>
                             <span><b>{Math.max(0, job.successfulItems - job.draftsCreated).toLocaleString("en-IN")}</b><small>Duplicates / existing skipped</small></span>
-                            <span><b>{remaining.toLocaleString("en-IN")}</b><small>Source records remaining</small></span>
-                            <span className={job.failedItems ? "has-failures" : ""}><b>{job.failedItems.toLocaleString("en-IN")}</b><small>Source records failed</small></span>
+                            <span><b>{remaining.toLocaleString("en-IN")}</b><small>Remaining, including retries</small></span>
+                            <span className={Number(job.retryItems || 0) ? "has-retries" : ""}><b>{Number(job.retryItems || 0).toLocaleString("en-IN")}</b><small>Queued for automatic retry</small></span>
+                            <span className={job.failedItems ? "has-failures" : ""}><b>{job.failedItems.toLocaleString("en-IN")}</b><small>Failed after retry</small></span>
                           </div>
                         </article>
                       );
                     })}
+                  </div>
+                </section>
+              )}
+
+              {!campaignDetailOpen && activeBackgroundJobs.length === 0 && latestCompletedBackgroundJob && (
+                <section className="panel campaign-completion-report" aria-live="polite">
+                  <div>
+                    <p className="eyebrow">Latest generation report</p>
+                    <h2>{latestCompletedBackgroundJob.campaignName}</h2>
+                    <span>All source records were finalized. Failed first attempts were retried automatically before this report was closed.</span>
+                  </div>
+                  <div className="background-job-metrics" aria-label="Final reconciled campaign generation counts">
+                    <span><b>{latestCompletedBackgroundJob.totalItems.toLocaleString("en-IN")}</b><small>Total source records</small></span>
+                    <span><b>{latestCompletedBackgroundJob.draftsCreated.toLocaleString("en-IN")}</b><small>Unique emails created</small></span>
+                    <span><b>{Math.max(0, latestCompletedBackgroundJob.successfulItems - latestCompletedBackgroundJob.draftsCreated).toLocaleString("en-IN")}</b><small>Duplicates / existing skipped</small></span>
+                    <span className={latestCompletedBackgroundJob.failedItems ? "has-failures" : ""}><b>{latestCompletedBackgroundJob.failedItems.toLocaleString("en-IN")}</b><small>Failed after retry</small></span>
                   </div>
                 </section>
               )}
@@ -1225,9 +1274,10 @@ Please let me know a suitable time to connect.`,
                     </div>
                   </div>
                   <div className="selection-toolbar">
-                    <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size ? paused ? "Review and test copies are available; client delivery is paused" : "Ready for review, testing, or delivery" : "Select campaign emails using the checkboxes"}</span></div>
+                    <div><strong>{selectedIds.size} selected</strong><span>{selectedIds.size === selectedCampaignEmails.length && selectedCampaignEmails.length ? `All ${selectedCampaignEmails.length} campaign emails selected` : selectedIds.size ? paused ? "Review and test copies are available; client delivery is paused" : "Ready for review, testing, or delivery" : "Select campaign emails using the checkboxes"}</span></div>
                     <div>
-                      <button disabled={!selectedIds.size || !control?.canManage || working} onClick={() => runAction({ action: "approve_batch", emailIds: [...selectedIds] }, `${selectedIds.size} campaign emails approved. Nothing has been sent.`)}>Approve</button>
+                      {selectedCampaignEmails.length > 0 && selectedIds.size !== selectedCampaignEmails.length && <button className="quiet-action" disabled={working} onClick={selectAllCampaignEmails}>Select all {selectedCampaignEmails.length}</button>}
+                      <button disabled={!selectedIds.size || !control?.canManage || working} onClick={approveCampaignSelection}>{selectedIds.size === selectedCampaignEmails.length && selectedCampaignEmails.length ? "Approve all" : "Approve selected"}</button>
                       <button className="test-action" disabled={!selectedIds.size || selectedIds.size > 5 || !control?.canManage || working} onClick={() => setBulkMode("test")} title={selectedIds.size > 5 ? "Select up to 5 drafts for a test" : ""}>Send test copy</button>
                       <button className="primary-action" disabled={!selectedIds.size || selectedCampaignUnapproved > 0 || selectedIds.size > 50 || paused || !control?.canManage || working} onClick={() => setBulkMode("schedule")} title={selectedCampaignUnapproved ? "Approve every selected email before scheduling" : paused ? "Turn off Pause all before scheduling" : selectedIds.size > 50 ? "Schedule up to 50 emails at a time" : ""}>Schedule selected</button>
                       <button className="send-action" disabled={!selectedIds.size || selectedCampaignUnapproved > 0 || selectedIds.size > 25 || paused || !control?.canManage || working} onClick={() => setBulkMode("send")} title={selectedCampaignUnapproved ? "Approve every selected email before sending" : paused ? "Turn off Pause all before sending" : selectedIds.size > 25 ? "Send up to 25 emails at a time" : ""}>Send selected now</button>

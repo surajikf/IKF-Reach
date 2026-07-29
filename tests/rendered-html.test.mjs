@@ -24,6 +24,8 @@ test("server queues campaign sources and processes them in bounded batches", () 
   assert.match(api, /process_background_campaign/);
   assert.match(api, /const batchLimit = estimatedRemaining > 200 \? 50 : estimatedRemaining > 50 \? 25 : 12/);
   assert.match(api, /now\.getTime\(\) - 45_000/);
+  assert.match(api, /status = 'failed' AND attempts < 2/);
+  assert.match(api, /AS retrying/);
   assert.match(api, /LIMIT \?/);
   assert.match(api, /suppliedWebsites\.length > 50/);
   assert.doesNotMatch(api, /parsedContacts\.length > 50/);
@@ -42,6 +44,8 @@ test("worker continues campaign research independently of the browser", () => {
   assert.match(page, /Live campaign generation/);
   assert.match(page, /Unique emails created/);
   assert.match(page, /Duplicates \/ existing skipped/);
+  assert.match(page, /Queued for automatic retry/);
+  assert.match(page, /Latest generation report/);
   assert.match(page, /All database contacts/);
   assert.match(worker, /const progress = await runBackgroundCampaignBatch/);
   assert.match(worker, /ctx\.waitUntil\(kickNextBackgroundBatch/);
@@ -49,6 +53,14 @@ test("worker continues campaign research independently of the browser", () => {
   assert.match(worker, /x-ikf-background-token/);
   assert.match(worker, /\/api\/background-campaign/);
   assert.match(viteConfig, /global_fetch_strictly_public/);
+});
+
+test("campaign email workspace can select and approve the complete campaign safely", () => {
+  assert.match(page, /Select all \{selectedCampaignEmails\.length\}/);
+  assert.match(page, /Approve all/);
+  assert.match(page, /This only changes approval status\. It will not send or schedule any email/);
+  assert.match(api, /body\.action === "approve_campaign"/);
+  assert.match(api, /campaign_drafts_approved/);
 });
 
 test("generated drafts enforce the requested selective email formatting", () => {

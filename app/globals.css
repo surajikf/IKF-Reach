@@ -318,12 +318,16 @@ tbody tr:hover { background: #f7f8ff; }
 .background-job-progress > div span { font-size: 12px; }
 .background-job-progress i { height: 7px; border-radius: 99px; background: #e7e4ff; overflow: hidden; }
 .background-job-progress i b { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6556e8, #8d7cff); display: block; transition: width .3s ease; }
-.background-job-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.background-job-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
 .background-job-metrics > span { min-width: 0; padding: 7px 9px; border-radius: 9px; background: #fff; border: 1px solid #ebe9ff; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: baseline; }
 .background-job-metrics b { color: #3f34c9; font-size: 15px; }
 .background-job-metrics small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .background-job-metrics .has-failures { background: #fff7f8; border-color: #f2c8cf; }
 .background-job-metrics .has-failures b { color: #b33e50; }
+.background-job-metrics .has-retries { background: #fffaf0; border-color: #f1d9a3; }
+.background-job-metrics .has-retries b { color: #9a6410; }
+.campaign-completion-report { display: grid; gap: 16px; padding: 22px; }
+.campaign-completion-report > div:first-child > span { color: var(--muted); }
 .background-job-actions { display: flex; align-items: center; gap: 9px; }
 .background-job-actions button { min-height: 34px; padding: 6px 11px; border: 1px solid #e3a8b2; border-radius: 9px; background: #fff7f8; color: #a23c4d; font-weight: 800; cursor: pointer; }
 .background-job-actions button:hover { background: #ffedf0; }
