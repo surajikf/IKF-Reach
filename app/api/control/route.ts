@@ -14,6 +14,13 @@ import {
   replacePersonalizationPlaceholders,
 } from "../../lib/personalization";
 import {
+  LEGACY_EMAIL_TEMPLATE_FORMAT,
+  RICH_EMAIL_TEMPLATE_FORMAT,
+  renderRichEmailTemplate,
+  richEmailTemplateToText,
+  sanitizeRichEmailTemplate,
+} from "../../lib/email-template";
+import {
   emailDomain,
   isPracticalEmailSyntax,
   normalizeEmailAddress,
@@ -275,6 +282,25 @@ function normalizedReplyTo(value: unknown, fallback = replyTo()) {
   return email;
 }
 
+function prepareSubmittedEmailTemplate(body: Record<string, any>) {
+  const requestedFormat = String(body.emailTemplateFormat || LEGACY_EMAIL_TEMPLATE_FORMAT);
+  const format = requestedFormat === RICH_EMAIL_TEMPLATE_FORMAT
+    ? RICH_EMAIL_TEMPLATE_FORMAT
+    : LEGACY_EMAIL_TEMPLATE_FORMAT;
+  const raw = String(body.emailTemplate || "").trim();
+  const version = Math.max(1, Math.floor(Number(body.emailTemplateVersion || body.templateVersion || 1)));
+  if (!raw) throw new Error("Add the email template to personalize for this campaign.");
+  if (format === RICH_EMAIL_TEMPLATE_FORMAT) {
+    if (raw.length > 100_000) throw new Error("Keep the formatted email template under 100,000 characters.");
+    const html = sanitizeRichEmailTemplate(raw);
+    const text = richEmailTemplateToText(html);
+    if (!text) throw new Error("The formatted email template does not contain any readable content.");
+    return { html, text, format, version };
+  }
+  if (raw.length > 15_000) throw new Error("Keep the email template under 15,000 characters.");
+  return { html: raw, text: raw, format, version };
+}
+
 function campaignReplyToKey(campaignId: string) {
   return `campaign_reply_to:${campaignId}`;
 }
@@ -326,7 +352,19 @@ type WebsiteScanResult = {
   research?: WebsiteResearch;
 };
 
-function draftHtml(input: { email: string; name?: string; company: string; brief?: string; topic?: string; research?: WebsiteResearch | null; template?: string; senderName?: string }) {
+function draftHtml(input: {
+  email: string;
+  name?: string;
+  company: string;
+  brief?: string;
+  topic?: string;
+  industry?: string;
+  website?: string;
+  research?: WebsiteResearch | null;
+  template?: string;
+  templateFormat?: string;
+  senderName?: string;
+}) {
   const name = greetingName(input.email, input.name);
   const researchedContext = input.research?.summary || input.research?.description || "";
   const context = input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`;
@@ -337,6 +375,7 @@ function draftHtml(input: { email: string; name?: string; company: string; brief
     company: input.company,
   }))) || "Ai Native Thinking Masterclass";
   const template = String(input.template || "").trim();
+  const richTemplate = input.templateFormat === RICH_EMAIL_TEMPLATE_FORMAT;
   const usesPersonalization = hasPersonalizationPlaceholder(template);
   const defaultTemplate = `Dear {{name}},
 
@@ -346,9 +385,27 @@ We would be delighted to conduct a practical {{topic}} session tailored to your 
 
 Please let me know a suitable time to connect.`;
   const personalizedOpening = !usesPersonalization && template
-    ? `Dear {{name}},\n\nWhile reviewing {{company}}, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.\n\n`
+    ? richTemplate
+      ? `<p>Dear {{name}},</p><p>While reviewing <strong><u>{{company}}</u></strong>, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.</p>`
+      : `Dear {{name}},\n\nWhile reviewing {{company}}, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.\n\n`
     : "";
-  let body = renderEmailTemplate(`${personalizedOpening}${template || defaultTemplate}`, { name, company: input.company, topic, research: context, focusAreas });
+  let body = richTemplate
+    ? renderRichEmailTemplate(`${personalizedOpening}${template}`, {
+        name,
+        company: input.company,
+        topic,
+        research: context,
+        focus_areas: focusAreas,
+        industry: input.industry || "",
+        website: input.website || input.research?.website || "",
+      })
+    : renderEmailTemplate(`${personalizedOpening}${template || defaultTemplate}`, {
+        name,
+        company: input.company,
+        topic,
+        research: context,
+        focusAreas,
+      });
   if (!/I Knowledge Factory Pvt\. Ltd\./i.test(body)) {
     body += `<p>Regards,<br><strong>${escapeHtml(input.senderName || sender.name)}</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
   }
@@ -528,11 +585,17 @@ export async function POST(req: NextRequest) {
     if (body.action === "queue_background_campaign") {
       const topic = String(body.topic || "").trim();
       const campaignName = cleanCampaignName(body.campaignName);
-      const emailTemplate = String(body.emailTemplate || "").trim();
       if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
-      if (!emailTemplate) return NextResponse.json({ ok: false, error: "Paste the email template to personalize for this campaign." }, { status: 400 });
-      if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
+      let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
+      try {
+        submittedTemplate = prepareSubmittedEmailTemplate(body);
+      } catch (error) {
+        return NextResponse.json(
+          { ok: false, error: error instanceof Error ? error.message : "The email template is invalid." },
+          { status: 400 },
+        );
+      }
 
       const documentText = body.document ? await extractDocumentText(body.document) : "";
       const parsedContacts = mergeContactInputs(
@@ -554,7 +617,10 @@ export async function POST(req: NextRequest) {
         campaignId: campaign.id,
         campaignName,
         topic,
-        emailTemplate,
+        emailTemplate: submittedTemplate.html,
+        emailTemplateFormat: submittedTemplate.format,
+        emailTemplateText: submittedTemplate.text,
+        templateVersion: submittedTemplate.version,
         brief: String(body.brief || ""),
         industry: cleanText(body.industry, 180),
         user,
@@ -636,6 +702,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "create_draft") {
+      const submittedTemplate = body.emailTemplate
+        ? prepareSubmittedEmailTemplate(body)
+        : null;
       const result = await createDraftRecord({
         email: body.email,
         name: body.name,
@@ -645,7 +714,10 @@ export async function POST(req: NextRequest) {
         brief: body.brief,
         topic: body.topic,
         campaignName: body.campaignName,
-        emailTemplate: body.emailTemplate,
+        emailTemplate: submittedTemplate?.html,
+        emailTemplateFormat: submittedTemplate?.format,
+        emailTemplateText: submittedTemplate?.text,
+        templateVersion: submittedTemplate?.version,
         source: "single_form",
       }, user);
       return NextResponse.json({ ok: true, draft: result.draft, research: result.research });
@@ -672,9 +744,15 @@ export async function POST(req: NextRequest) {
       if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
       const campaignName = cleanCampaignName(body.campaignName);
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
-      const emailTemplate = String(body.emailTemplate || "").trim();
-      if (!emailTemplate) return NextResponse.json({ ok: false, error: "Paste the email template to personalize for this campaign." }, { status: 400 });
-      if (emailTemplate.length > 15_000) return NextResponse.json({ ok: false, error: "Keep the email template under 15,000 characters." }, { status: 400 });
+      let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
+      try {
+        submittedTemplate = prepareSubmittedEmailTemplate(body);
+      } catch (error) {
+        return NextResponse.json(
+          { ok: false, error: error instanceof Error ? error.message : "The email template is invalid." },
+          { status: 400 },
+        );
+      }
       const documentText = body.document ? await extractDocumentText(body.document) : "";
       const parsedContacts = mergeContactInputs(
         parseContactInput(String(body.rawInput || "")),
@@ -720,7 +798,10 @@ export async function POST(req: NextRequest) {
             ...input,
             topic,
             campaignName,
-            emailTemplate,
+            emailTemplate: submittedTemplate.html,
+            emailTemplateFormat: submittedTemplate.format,
+            emailTemplateText: submittedTemplate.text,
+            templateVersion: submittedTemplate.version,
             brief: String(body.brief || ""),
             industry: cleanText(body.industry, 180),
             source: body.document?.name ? `document:${body.document.name}` : "pasted_list",
@@ -1638,6 +1719,9 @@ async function listBackgroundJobs() {
         campaign_name AS campaignName,
         topic,
         email_template AS emailTemplate,
+        email_template_format AS emailTemplateFormat,
+        email_template_text AS emailTemplateText,
+        template_version AS templateVersion,
         brief,
         status,
         total_items AS totalItems,
@@ -1731,6 +1815,9 @@ async function queueBackgroundCampaign(input: {
   campaignName: string;
   topic: string;
   emailTemplate: string;
+  emailTemplateFormat: string;
+  emailTemplateText: string;
+  templateVersion: number;
   brief: string;
   industry?: string;
   user: string;
@@ -1756,11 +1843,26 @@ async function queueBackgroundCampaign(input: {
   ];
   await queueDb.prepare(`
       INSERT INTO background_research_jobs (
-        id, campaign_id, campaign_name, topic, email_template, brief, created_by,
+        id, campaign_id, campaign_name, topic, email_template,
+        email_template_format, email_template_text, template_version, brief, created_by,
         status, total_items, completed_items, successful_items, failed_items,
         drafts_created, contacts_found, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, ?, ?)
-    `).bind(id, input.campaignId, input.campaignName, input.topic, input.emailTemplate, input.brief || null, input.user, items.length, now, now).run();
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0, 0, 0, ?, ?)
+    `).bind(
+      id,
+      input.campaignId,
+      input.campaignName,
+      input.topic,
+      input.emailTemplate,
+      input.emailTemplateFormat,
+      input.emailTemplateText,
+      input.templateVersion,
+      input.brief || null,
+      input.user,
+      items.length,
+      now,
+      now,
+    ).run();
   try {
     for (let offset = 0; offset < items.length; offset += 75) {
       const batch = items.slice(offset, offset + 75);
@@ -1781,6 +1883,9 @@ async function queueBackgroundCampaign(input: {
     id,
     campaignId: input.campaignId,
     campaignName: input.campaignName,
+    emailTemplateFormat: input.emailTemplateFormat,
+    emailTemplateText: input.emailTemplateText,
+    templateVersion: input.templateVersion,
     status: "queued",
     totalItems: items.length,
     completedItems: 0,
@@ -2008,6 +2113,9 @@ async function processBackgroundResearchItem(item: Record<string, any>, job: Rec
     topic: job.topic,
     campaignName: job.campaign_name,
     emailTemplate: job.email_template,
+    emailTemplateFormat: job.email_template_format || LEGACY_EMAIL_TEMPLATE_FORMAT,
+    emailTemplateText: job.email_template_text || job.email_template,
+    templateVersion: Number(job.template_version || 1),
     brief: job.brief || "",
     industry: cleanText(payload.industry, 180),
     source: `background_campaign:${job.id}`,
@@ -2111,6 +2219,9 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
         brief: String(existing.research_summary || job.brief || ""),
         topic: String(job.topic || "AI Native Thinking Masterclass"),
         template: String(job.email_template || ""),
+        templateFormat: String(job.email_template_format || LEGACY_EMAIL_TEMPLATE_FORMAT),
+        industry: String(existing.industry || ""),
+        website: String(existing.website || ""),
         senderName,
       });
       return [{
@@ -2124,6 +2235,8 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
           selective_bold_titles: true,
           important_keywords_bold: true,
           formatting_version: 4,
+          template_format: String(job.email_template_format || LEGACY_EMAIL_TEMPLATE_FORMAT),
+          template_version: Number(job.template_version || 1),
           formatting_refreshed_at: formattedAt,
         },
       }];
@@ -2245,7 +2358,23 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     email: String(campaign.sender_email || sender.email),
   };
   const campaignReplyToEmail = normalizedReplyTo(campaign.reply_to_email, replyTo());
-  const html = draftHtml({ email, name: input.name, company: companyName, brief: input.brief, topic, research, template: input.emailTemplate, senderName: campaignSender.name });
+  const templateFormat = input.emailTemplateFormat === RICH_EMAIL_TEMPLATE_FORMAT
+    ? RICH_EMAIL_TEMPLATE_FORMAT
+    : LEGACY_EMAIL_TEMPLATE_FORMAT;
+  const templateVersion = Math.max(1, Math.floor(Number(input.templateVersion || 1)));
+  const html = draftHtml({
+    email,
+    name: input.name,
+    company: companyName,
+    brief: input.brief,
+    topic,
+    industry: companyIndustry,
+    website: website || "",
+    research,
+    template: input.emailTemplate,
+    templateFormat,
+    senderName: campaignSender.name,
+  });
   const drafts = await db("generated_emails", {
     method: "POST",
     body: JSON.stringify({
@@ -2263,6 +2392,9 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
         topic,
         campaign_name: campaignName,
         template_provided: Boolean(String(input.emailTemplate || "").trim()),
+        template_format: templateFormat,
+        template_version: templateVersion,
+        template_snapshot_text: String(input.emailTemplateText || "").slice(0, 15_000),
         research_summary: research?.summary || "",
         focus_areas: research?.focusAreas || [],
         website,

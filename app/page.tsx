@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import data from "./dashboard-data.json";
 import StatisticsDashboard from "./statistics-dashboard";
+import RichEmailEditor from "./rich-email-editor";
 import { inferContactName } from "./lib/name";
 
 type Section = "overview" | "create" | "campaigns" | "statistics" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
@@ -13,7 +14,7 @@ type CompanyRecord = { id: string; name: string; website?: string | null; indust
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
 type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
-type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; retryItems?: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
+type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; emailTemplateFormat?: string; emailTemplateText?: string; templateVersion?: number; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; retryItems?: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
 type ValidationVerdict = "valid" | "risky" | "invalid" | "unknown";
 type ValidationResult = { contactId: string; email: string; verdict: ValidationVerdict; score: number; syntaxValid: boolean; domainReachable: boolean | null; roleBased: boolean; disposable: boolean; previousHardBounce: boolean; previousSoftBounce: boolean; previousDelivered: boolean; complaint: boolean; unsubscribed: boolean; reasons: string[]; mxRecords: string[]; validatedAt: string };
 type ValidationJob = { id: string; status: string; scheduledFor?: string | null; totalItems: number; processedItems: number; validItems: number; riskyItems: number; invalidItems: number; unknownItems: number; failedItems: number; lastError?: string | null; createdAt: string; startedAt?: string | null; completedAt?: string | null; updatedAt: string };
@@ -237,13 +238,12 @@ export default function Home() {
   const [intakeForm, setIntakeForm] = useState({
     campaignName: "AI Native Thinking Masterclass Outreach",
     topic: "AI Native Thinking Masterclass",
-    emailTemplate: `Dear {{name}},
-
-While reviewing {{company}}, I noted its focus on {{research}}. This creates a relevant opportunity to apply {{topic}} thinking across {{focus_areas}}.
-
-We would be delighted to conduct a practical {{topic}} session tailored to your leadership and functional teams.
-
-Please let me know a suitable time to connect.`,
+    emailTemplate: `<p>Dear <span class="personalization-chip" data-personalization="name" contenteditable="false">{{name}}</span>,</p>
+<p>While reviewing <strong><u><span class="personalization-chip" data-personalization="company" contenteditable="false">{{company}}</span></u></strong>, I noted its focus on <span class="personalization-chip" data-personalization="research" contenteditable="false">{{research}}</span>. This creates a relevant opportunity to apply <strong><span class="personalization-chip" data-personalization="topic" contenteditable="false">{{topic}}</span></strong> thinking across <span class="personalization-chip" data-personalization="focus_areas" contenteditable="false">{{focus_areas}}</span>.</p>
+<p>We would be delighted to conduct a practical <strong><span class="personalization-chip" data-personalization="topic" contenteditable="false">{{topic}}</span></strong> session tailored to your leadership and functional teams.</p>
+<p>Please let me know a suitable time to connect.</p>`,
+    emailTemplateFormat: "rich_html_v1",
+    emailTemplateVersion: 1,
     rawInput: "",
     websites: "",
     brief: "",
@@ -1326,7 +1326,9 @@ Please let me know a suitable time to connect.`,
                         <span>{selectedCampaignSummary.researchJob?.emailTemplate ? "This is the source template used to personalize every recipient email." : "This legacy campaign was created before source templates were retained in the campaign workspace."}</span>
                       </div>
                       {selectedCampaignSummary.researchJob?.emailTemplate
-                        ? <pre>{selectedCampaignSummary.researchJob.emailTemplate}</pre>
+                        ? selectedCampaignSummary.researchJob.emailTemplateFormat === "rich_html_v1"
+                          ? <div className="campaign-template-preview" dangerouslySetInnerHTML={{ __html: selectedCampaignSummary.researchJob.emailTemplate }} />
+                          : <pre>{selectedCampaignSummary.researchJob.emailTemplate}</pre>
                         : <div className="empty-state">Original template unavailable. Generated emails remain available in the Emails tab.</div>}
                     </div>
 
@@ -1560,7 +1562,18 @@ Please let me know a suitable time to connect.`,
                     <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
                     <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {ASSOCIATION NAME} - AI Native Thinking Masterclass" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
                   </div>
-                  <label className="template-field"><span>Your email template</span><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><small>Personalization fields accept smart aliases such as <code>{"{ASSOCIATION NAME}"}</code>, <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. If any placeholder has no value, it is removed and the surrounding phrase is cleaned automatically—curly brackets never appear in the generated email.</small></label>
+                  <section className="template-field">
+                    <div className="template-field-heading">
+                      <span>Your email template</span>
+                      <small>Rich campaign template · Version {intakeForm.emailTemplateVersion}</small>
+                    </div>
+                    <RichEmailEditor
+                      value={intakeForm.emailTemplate}
+                      disabled={working}
+                      onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))}
+                    />
+                    <small>Use the <strong>Personalize</strong> menu to insert contact, company, research, topic, industry, website, or focus-area fields. Formatting around each field is preserved in every generated email. Missing values and curly brackets are removed safely before review or delivery.</small>
+                  </section>
                   <div className="source-grid">
                     <label className="source-card">
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>

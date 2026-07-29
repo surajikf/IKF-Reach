@@ -5,6 +5,9 @@ import test from "node:test";
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const api = await readFile(new URL("../app/api/control/route.ts", import.meta.url), "utf8");
+const richEditor = await readFile(new URL("../app/rich-email-editor.tsx", import.meta.url), "utf8");
+const richTemplate = await readFile(new URL("../app/lib/email-template.ts", import.meta.url), "utf8");
+const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
 const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
 const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
 const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", import.meta.url), "utf8");
@@ -80,6 +83,32 @@ test("generated drafts enforce the requested selective email formatting", () => 
   assert.match(api, /safe\.split\(`IKFPERSONALIZATIONTOKEN/);
   assert.match(api, /refreshBackgroundCampaignDraftFormatting/);
   assert.match(api, /sent_and_scheduled_excluded: true/);
+});
+
+test("campaign composer preserves safe Gmail-style formatting and personalization", () => {
+  assert.match(page, /<RichEmailEditor/);
+  assert.match(richEditor, /contentEditable/);
+  assert.match(richEditor, /fontName/);
+  assert.match(richEditor, /fontSize/);
+  assert.match(richEditor, /insertUnorderedList/);
+  assert.match(richEditor, /createLink/);
+  assert.match(richEditor, /data-personalization/);
+  assert.match(richTemplate, /sanitizeRichEmailTemplate/);
+  assert.match(richTemplate, /renderRichEmailTemplate/);
+  assert.match(richTemplate, /javascript:/);
+  assert.match(richTemplate, /preservePlaceholders/);
+  assert.match(api, /RICH_EMAIL_TEMPLATE_FORMAT/);
+});
+
+test("background campaigns snapshot template format, readable fallback, and version", () => {
+  assert.match(schema, /emailTemplateFormat: text\("email_template_format"\)/);
+  assert.match(schema, /emailTemplateText: text\("email_template_text"\)/);
+  assert.match(schema, /templateVersion: integer\("template_version"\)/);
+  assert.match(api, /email_template_format AS emailTemplateFormat/);
+  assert.match(api, /email_template_text AS emailTemplateText/);
+  assert.match(api, /template_version AS templateVersion/);
+  assert.match(api, /template_format: templateFormat/);
+  assert.match(api, /template_version: templateVersion/);
 });
 
 test("contacts and companies paginate their complete filtered datasets independently", () => {
