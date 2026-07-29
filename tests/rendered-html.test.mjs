@@ -157,3 +157,18 @@ test("Brevo webhook events are authenticated, deduplicated, and stored durably",
   assert.match(statisticsApi, /database: 0, webhook: 1, brevo: 2/);
   assert.match(statisticsApi, /if \(!send\) continue/);
 });
+
+test("existing unsent drafts can refresh smart greetings without touching sent or scheduled mail", () => {
+  assert.match(api, /refresh_unsent_draft_names/);
+  assert.match(api, /status=in\.\(draft_pending_review,approved\)/);
+  assert.match(api, /rewriteStoredGreeting/);
+  assert.match(api, /smart_email_inference/);
+  assert.match(api, /respectful_fallback/);
+  assert.match(api, /sentAndScheduledExcluded: true/);
+});
+
+test("company cards expose the full clickable website URL", () => {
+  assert.match(page, /function fullWebsiteUrl/);
+  assert.match(page, /className="company-website-url"/);
+  assert.doesNotMatch(page, />Visit website</);
+});

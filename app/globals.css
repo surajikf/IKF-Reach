@@ -462,6 +462,7 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .company-card-actions { margin-top: 5px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .company-card-actions button { min-height: 36px; padding: 7px 11px; border: 1px solid #cfcaf7; border-radius: 8px; background: #f7f6ff; color: var(--accent); font-weight: 800; cursor: pointer; }
 .company-card-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.company-website-url { overflow-wrap: anywhere; word-break: break-word; }
 .company-contact-drawer { width: min(720px, 96vw); height: 100%; background: #f7f8fa; box-shadow: -12px 0 40px rgba(17,25,32,.18); display: flex; flex-direction: column; }
 .company-profile-summary { padding: 16px 24px; border-bottom: 1px solid var(--line); background: #fff; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .company-profile-summary span { min-width: 0; padding: 9px 13px; border-right: 1px solid var(--line); color: var(--muted); display: grid; gap: 4px; font-size: 13px; }

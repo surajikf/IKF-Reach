@@ -845,6 +845,83 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, scanned: rows.length, updated: changed.length });
     }
 
+    if (body.action === "refresh_unsent_draft_names") {
+      const dryRun = body.dryRun !== false;
+      const drafts = await db("generated_emails?select=id,contact_id,html_body,status,personalization_data&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=5000");
+      const contactIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
+      const contactRows: Array<Record<string, any>> = [];
+      for (const group of chunk(contactIds, 50)) {
+        contactRows.push(...await db(`contacts?select=id,email,full_name&id=in.(${group.join(",")})`));
+      }
+      const contactById = new Map(contactRows.map((contact: Record<string, any>) => [String(contact.id), contact]));
+      const changes = drafts.flatMap((draft: Record<string, any>) => {
+        const contact = contactById.get(String(draft.contact_id));
+        if (!contact?.email) return [];
+        const inferredName = inferContactName(String(contact.email), contact.full_name);
+        const nextHtml = rewriteStoredGreeting(cleanupUnresolvedHtml(draft.html_body), inferredName);
+        const existingPersonalization = draft.personalization_data && typeof draft.personalization_data === "object" ? draft.personalization_data : {};
+        const greetingSource = contact.full_name
+          ? "database_name"
+          : inferredName === "Sir/Madam"
+            ? "respectful_fallback"
+            : "smart_email_inference";
+        const personalizationChanged =
+          existingPersonalization.greeting_name !== inferredName ||
+          existingPersonalization.greeting_source !== greetingSource;
+        if (nextHtml === draft.html_body && !personalizationChanged) return [];
+        return [{
+          id: String(draft.id),
+          email: String(contact.email),
+          inferredName,
+          html: nextHtml,
+          personalization: {
+            ...existingPersonalization,
+            greeting_name: inferredName,
+            greeting_source: greetingSource,
+            greeting_refreshed_at: new Date().toISOString(),
+          },
+        }];
+      });
+      if (!dryRun) {
+        for (const group of chunk(changes, 20)) {
+          await Promise.all(group.map((change) =>
+            db(`generated_emails?id=eq.${change.id}&status=in.(draft_pending_review,approved)`, {
+              method: "PATCH",
+              body: JSON.stringify({
+                html_body: change.html,
+                personalization_data: change.personalization,
+              }),
+            })
+          ));
+        }
+        await db("activity_log", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "unsent_draft_names_refreshed",
+            details: {
+              scanned_drafts: drafts.length,
+              updated_drafts: changes.length,
+              personalized_names: changes.filter((change) => change.inferredName !== "Sir/Madam").length,
+              respectful_fallbacks: changes.filter((change) => change.inferredName === "Sir/Madam").length,
+              sent_and_scheduled_excluded: true,
+              updated_by: user,
+            },
+          }),
+        });
+      }
+      return NextResponse.json({
+        ok: true,
+        dryRun,
+        scanned: drafts.length,
+        wouldUpdate: changes.length,
+        updated: dryRun ? 0 : changes.length,
+        personalizedNames: changes.filter((change) => change.inferredName !== "Sir/Madam").length,
+        respectfulFallbacks: changes.filter((change) => change.inferredName === "Sir/Madam").length,
+        eligibleStatuses: ["draft_pending_review", "approved"],
+        sentAndScheduledExcluded: true,
+      });
+    }
+
     if (body.action === "approve_batch") {
       const ids = cleanIds(body.emailIds);
       if (!ids.length) return NextResponse.json({ ok: false, error: "Select at least one email." }, { status: 400 });
@@ -2189,9 +2266,15 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function rewriteStoredGreeting(html: string, name: string) {
+  const greeting = name && name !== "Sir/Madam" ? escapeHtml(name) : "Sir/Madam";
+  const paragraphGreeting = /(<p\b[^>]*>\s*)Dear(?:\s|&nbsp;)+(?:<[^>]+>)*[^,<\r\n]{1,80}(?:<\/[^>]+>)*(?=\s*,)/i;
+  if (paragraphGreeting.test(html)) return html.replace(paragraphGreeting, `$1Dear ${greeting}`);
+  return html.replace(/(^|\r?\n)(\s*)Dear\s+[^,<\r\n]{1,80}(?=\s*,)/i, `$1$2Dear ${greeting}`);
+}
+
 function personalizeStoredGreeting(html: string, name: string) {
-  if (!name || name === "Sir/Madam") return html;
-  return html.replace(/Dear\s+(?:Sir\/?Madam|Sir or Madam)/i, `Dear ${escapeHtml(name)}`);
+  return rewriteStoredGreeting(html, name);
 }
 
 function cleanIds(value: unknown): string[] {

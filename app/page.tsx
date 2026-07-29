@@ -97,6 +97,12 @@ function prettyStatus(value?: string | null) {
   return statusLabel[value] || value.replaceAll("_", " ");
 }
 
+function fullWebsiteUrl(value?: string | null) {
+  const website = String(value || "").trim();
+  if (!website) return "";
+  return /^https?:\/\//i.test(website) ? website : `https://${website.replace(/^\/+/, "")}`;
+}
+
 function statusTone(value?: string | null) {
   if (!value || value.includes("draft") || value.includes("review")) return "review";
   if (value === "sent" || value === "active" || value === "delivered" || value === "completed") return "good";
@@ -1538,7 +1544,10 @@ Please let me know a suitable time to connect.`,
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2></div><div className="contact-list-controls"><span>Deduplicated by domain</span><label><span>Industry</span><select value={companyIndustry} onChange={(event) => { setCompanyIndustry(event.target.value); setCompanyPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label></div></div>
               <div className="company-grid">
-                {pagedCompanies.map((company) => <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small><div className="company-card-actions"><button type="button" onClick={() => setSelectedCompany(company)}>View contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit company</button>{company.website && <a href={company.website} target="_blank" rel="noreferrer">Visit website</a>}</div></div></article>)}
+                {pagedCompanies.map((company) => {
+                  const website = fullWebsiteUrl(company.website);
+                  return <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small><div className="company-card-actions"><button type="button" onClick={() => setSelectedCompany(company)}>View contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit company</button>{website && <a className="company-website-url" href={website} target="_blank" rel="noreferrer" title={`Open ${website}`}>{website}</a>}</div></div></article>;
+                })}
               </div>
               {!pagedCompanies.length && <div className="empty-state">No companies match your search.</div>}
               <div className="pagination">
@@ -1614,7 +1623,7 @@ Please let me know a suitable time to connect.`,
               ))}
               {!displayContacts.some((contact) => contact.companyId === selectedCompany.id) && <div className="empty-state">No contacts are linked to this company yet.</div>}
             </div>
-            <div className="drawer-footer"><span>Company details are shared by all linked contacts.</span><div><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(selectedCompany)}>Edit company</button>{selectedCompany.website && <a href={selectedCompany.website} target="_blank" rel="noreferrer">Open company website</a>}</div></div>
+            <div className="drawer-footer"><span>Company details are shared by all linked contacts.</span><div><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(selectedCompany)}>Edit company</button>{selectedCompany.website && <a className="company-website-url" href={fullWebsiteUrl(selectedCompany.website)} target="_blank" rel="noreferrer">{fullWebsiteUrl(selectedCompany.website)}</a>}</div></div>
           </aside>
         </div>
       )}
