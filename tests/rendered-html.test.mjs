@@ -179,3 +179,18 @@ test("campaign directory uses the full workspace with a responsive card grid", (
   assert.match(css, /\.campaign-directory-list \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 1280px\)[\s\S]*\.campaign-directory-list \{ grid-template-columns: 1fr; \}/);
 });
+
+test("campaign creation supports dynamic organization placeholders in subject and body", () => {
+  assert.match(page, /Email topic \/ subject template/);
+  assert.match(page, /\{ASSOCIATION NAME\}/);
+  assert.match(page, /\{\{company\}\}/);
+  assert.match(api, /renderPersonalizedSubject/);
+  assert.match(api, /replacePersonalizationPlaceholders/);
+});
+
+test("empty live datasets do not resurrect deleted snapshot campaigns or emails", () => {
+  assert.match(page, /Array\.isArray\(control\?\.campaigns\)/);
+  assert.match(page, /Array\.isArray\(control\?\.liveEmails\)/);
+  assert.match(page, /Array\.isArray\(control\?\.liveContacts\)/);
+  assert.match(page, /Array\.isArray\(control\?\.liveCompanies\)/);
+});

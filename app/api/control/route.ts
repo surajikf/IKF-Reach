@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb } from "../../../db";
 import { buildCampaignSchedule, insideIndiaWindow } from "../../lib/schedule";
 import { inferContactName } from "../../lib/name";
+import {
+  cleanPersonalizedSubject,
+  hasPersonalizationPlaceholder,
+  renderPersonalizedSubject,
+  replacePersonalizationPlaceholders,
+} from "../../lib/personalization";
 
 export const dynamic = "force-dynamic";
 
@@ -97,9 +103,13 @@ function draftHtml(input: { email: string; name?: string; company: string; brief
   const researchedContext = input.research?.summary || input.research?.description || "";
   const context = input.brief?.trim() || researchedContext || `${input.company}'s priorities, operations, and growth plans`;
   const focusAreas = input.research?.focusAreas?.length ? input.research.focusAreas.slice(0, 3).join(", ") : "productivity, knowledge workflows, and stakeholder engagement";
-  const topic = input.topic?.trim() || "AI Native Thinking Masterclass";
+  const topicTemplate = input.topic?.trim() || "AI Native Thinking Masterclass";
+  const topic = cleanPersonalizedSubject(replacePersonalizationPlaceholders(topicTemplate, {
+    name,
+    company: input.company,
+  })) || "AI Native Thinking Masterclass";
   const template = String(input.template || "").trim();
-  const usesPersonalization = /\{\{\s*(name|company|topic|research|focus_areas)\s*\}\}/i.test(template);
+  const usesPersonalization = hasPersonalizationPlaceholder(template);
   const defaultTemplate = `Dear {{name}},
 
 While reviewing {{company}}, I noted its focus on {{research}}. This creates a relevant opportunity to apply {{topic}} thinking across {{focus_areas}}.
@@ -1782,6 +1792,12 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
     return { draft: existing[0], company, contact, research, skipped: true };
   }
   const topic = String(input.topic || "AI Native Thinking Masterclass").trim();
+  const personalizedSubject = renderPersonalizedSubject(topic, {
+    name: greetingName(email, input.name),
+    company: companyName,
+    industry: companyIndustry,
+    website: website || "",
+  });
   const campaignSender = {
     name: String(campaign.sender_name || sender.name),
     email: String(campaign.sender_email || sender.email),
@@ -1795,7 +1811,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
       contact_id: contact.id,
       campaign_id: campaign.id,
       version: (existing[0]?.version || 0) + 1,
-      subject: `${companyName} - ${topic}`,
+      subject: personalizedSubject,
       html_body: html,
       status: "draft_pending_review",
       personalization_data: {
@@ -2169,7 +2185,7 @@ function cleanupTemplateText(value: string) {
     .split("\n")
     .map((line) => {
       let clean = line
-        .replace(/\{\{\s*[^{}]{1,80}\s*\}\}/g, "")
+        .replace(/\{\{\s*[^{}]{1,80}\s*\}\}|\{\s*[^{}]{1,80}\s*\}/g, "")
         .replace(/[ \t]+/g, " ")
         .replace(/\b(?:with|using|through|about|regarding|around|for)\s+(?=(?:to|and|or)\b|[,.;:!?]|$)/gi, "")
         .replace(/\s+([,.;:!?])/g, "$1")
@@ -2186,7 +2202,7 @@ function cleanupTemplateText(value: string) {
 
 function cleanupUnresolvedHtml(value: unknown) {
   let html = String(value || "")
-    .replace(/\{\{\s*[^{}]{1,80}\s*\}\}/g, "")
+    .replace(/\{\{\s*[^{}]{1,80}\s*\}\}|\{\s*[^{}]{1,80}\s*\}/g, "")
     .replace(/\b(?:with|using|through|about|regarding|around|for)(?:\s|&nbsp;)+(?=(?:to|and|or)\b|[,.;:!?])/gi, "")
     .replace(/(?:\s|&nbsp;)+([,.;:!?])/g, "$1")
     .replace(/<(strong|u|em|b)>\s*<\/\1>/gi, "");
@@ -2206,13 +2222,14 @@ function renderEmailTemplate(template: string, values: { name: string; company: 
     focus_areas: escapeHtml(values.focusAreas),
   };
   const tokens: string[] = [];
-  const withTokens = template.replace(/\{\{\s*([a-z][a-z0-9_.-]{0,79})\s*\}\}/gi, (_, key: string) => {
-    const value = tokenValues[key.toLowerCase()] || "";
-    if (!value) return "";
+  const markedValues: Record<string, string> = {};
+  Object.entries(tokenValues).forEach(([key, value]) => {
+    if (!value) return;
     const marker = `IKFPERSONALIZATIONTOKEN${tokens.length}END`;
     tokens.push(value);
-    return marker;
+    markedValues[key] = marker;
   });
+  const withTokens = replacePersonalizationPlaceholders(template, markedValues);
   let safe = escapeHtml(cleanupTemplateText(withTokens));
   tokens.forEach((value, index) => {
     safe = safe.replace(`IKFPERSONALIZATIONTOKEN${index}END`, value);

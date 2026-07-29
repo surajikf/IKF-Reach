@@ -325,10 +325,10 @@ Please let me know a suitable time to connect.`,
     }
   }
 
-  const displayEmails = useMemo<EmailRecord[]>(() => control?.liveEmails?.length ? control.liveEmails : data.emails as EmailRecord[], [control?.liveEmails]);
-  const displayContacts = useMemo<ContactRecord[]>(() => control?.liveContacts?.length ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
-  const displayCompanies = useMemo<CompanyRecord[]>(() => control?.liveCompanies?.length ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
-  const displayActivity = useMemo<ActivityRecord[]>(() => control?.liveActivity?.length ? control.liveActivity : data.activity as ActivityRecord[], [control?.liveActivity]);
+  const displayEmails = useMemo<EmailRecord[]>(() => Array.isArray(control?.liveEmails) ? control.liveEmails : data.emails as EmailRecord[], [control?.liveEmails]);
+  const displayContacts = useMemo<ContactRecord[]>(() => Array.isArray(control?.liveContacts) ? control.liveContacts : data.contacts as ContactRecord[], [control?.liveContacts]);
+  const displayCompanies = useMemo<CompanyRecord[]>(() => Array.isArray(control?.liveCompanies) ? control.liveCompanies : data.companies as CompanyRecord[], [control?.liveCompanies]);
+  const displayActivity = useMemo<ActivityRecord[]>(() => Array.isArray(control?.liveActivity) ? control.liveActivity : data.activity as ActivityRecord[], [control?.liveActivity]);
   const availableIndustries = useMemo(
     () => [...new Set([...industryDomains, ...displayCompanies.map((company) => company.industry || "").filter(Boolean)])].sort((a, b) => a.localeCompare(b)),
     [displayCompanies],
@@ -368,7 +368,7 @@ Please let me know a suitable time to connect.`,
   const effectiveCampaignGap = Math.max(globalMinimumGap, queueForm.delayMinutes);
   const backgroundJobs = useMemo<BackgroundJob[]>(() => (control?.jobs || []) as BackgroundJob[], [control?.jobs]);
   const activeBackgroundJobs = useMemo(() => backgroundJobs.filter((job) => ["queued", "researching"].includes(job.status)), [backgroundJobs]);
-  const displayCampaigns = useMemo(() => control?.campaigns?.length ? control.campaigns.map((campaign) => ({
+  const displayCampaigns = useMemo(() => Array.isArray(control?.campaigns) ? control.campaigns.map((campaign) => ({
     id: String(campaign.id || campaign.name),
     name: String(campaign.name || "Outreach"),
     status: paused ? "paused_user_hold" : String(campaign.status || "active"),
@@ -1327,9 +1327,9 @@ Please let me know a suitable time to connect.`,
                 <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
                   <div className="campaign-setup-grid">
                     <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
-                    <label className="topic-field"><span>Email topic</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: AI-enabled manufacturing operations" /><small>Used to build each personalized subject line.</small></label>
+                    <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {ASSOCIATION NAME} - AI Native Thinking Masterclass" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
                   </div>
-                  <label className="template-field"><span>Your email template</span><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><small>Personalization fields: <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. If any placeholder has no value, it is removed and the surrounding phrase is cleaned automatically—curly brackets never appear in the generated email.</small></label>
+                  <label className="template-field"><span>Your email template</span><textarea required rows={9} value={intakeForm.emailTemplate} onChange={(event) => setIntakeForm({ ...intakeForm, emailTemplate: event.target.value })} placeholder="Paste the email you want personalized for every client in this campaign." /><small>Personalization fields accept smart aliases such as <code>{"{ASSOCIATION NAME}"}</code>, <code>{"{{name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{topic}}"}</code>, <code>{"{{research}}"}</code>, and <code>{"{{focus_areas}}"}</code>. If any placeholder has no value, it is removed and the surrounding phrase is cleaned automatically—curly brackets never appear in the generated email.</small></label>
                   <div className="source-grid">
                     <label className="source-card">
                       <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
