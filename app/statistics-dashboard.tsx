@@ -35,7 +35,7 @@ type ReportTab = "overview" | "deliverability" | "opens" | "clicks" | "recipient
 
 const openEvents = new Set(["opened", "uniqueOpened", "loadedByProxy"]);
 const clickEvents = new Set(["click"]);
-const bounceEvents = new Set(["softBounce", "hardBounce", "invalid", "error"]);
+const bounceEvents = new Set(["softBounce", "hardBounce"]);
 const eventNames: Record<string, string> = {
   sent: "Sent",
   scheduled: "Scheduled",
@@ -55,7 +55,10 @@ const eventNames: Record<string, string> = {
 };
 
 function dateInput(date: Date) {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function presetRange(preset: string, customStart: string, customEnd: string) {
@@ -76,7 +79,7 @@ function presetRange(preset: string, customStart: string, customEnd: string) {
 }
 
 function messageKey(event: AnalyticsEvent) {
-  return event.generatedEmailId || event.messageId || `${event.recipient}|${event.subject}`;
+  return event.messageId || event.emailSendId || event.generatedEmailId || `${event.recipient}|${event.subject}`;
 }
 
 function uniqueMessages(events: AnalyticsEvent[]) {
@@ -103,7 +106,7 @@ function formatDateTime(value: string) {
 
 function eventTone(event: string) {
   if (event === "delivered" || openEvents.has(event) || event === "click") return "positive";
-  if (bounceEvents.has(event) || ["blocked", "spam", "unsubscribed"].includes(event)) return "negative";
+  if (bounceEvents.has(event) || ["blocked", "invalid", "error", "spam", "unsubscribed"].includes(event)) return "negative";
   if (event === "deferred" || event === "scheduled") return "warning";
   return "neutral";
 }
@@ -169,15 +172,16 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     const sent = uniqueMessages(byType(["sent"]));
     const delivered = uniqueMessages(byType(["delivered"]));
     const openRows = byType(openEvents);
+    const totalOpenRows = byType(["opened", "loadedByProxy"]);
     const clickRows = byType(clickEvents);
     const uniqueOpens = uniqueMessages(openRows);
     const uniqueClicks = uniqueMessages(clickRows);
     const softBounces = uniqueMessages(byType(["softBounce"]));
-    const hardBounces = uniqueMessages(byType(["hardBounce", "invalid", "error"]));
+    const hardBounces = uniqueMessages(byType(["hardBounce"]));
     return {
       sent,
       delivered,
-      totalOpens: openRows.length,
+      totalOpens: totalOpenRows.length,
       uniqueOpens,
       totalClicks: clickRows.length,
       uniqueClicks,
@@ -225,7 +229,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
       if (!row) continue;
       if (event.event === "sent") row.sent += 1;
       if (event.event === "delivered") row.delivered += 1;
-      if (openEvents.has(event.event)) row.opened += 1;
+      if (event.event === "opened" || event.event === "loadedByProxy") row.opened += 1;
       if (clickEvents.has(event.event)) row.clicked += 1;
       if (bounceEvents.has(event.event)) row.bounced += 1;
     }
@@ -272,23 +276,23 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
       latest: rows[0]?.date || "",
       events: rows,
       score: Math.min(100, (rows.some((event) => event.event === "delivered") ? 15 : 0)
-        + Math.min(40, rows.filter((event) => openEvents.has(event.event)).length * 10)
+        + Math.min(40, new Set(rows.filter((event) => openEvents.has(event.event)).map((event) => event.date)).size * 10)
         + Math.min(45, rows.filter((event) => event.event === "click").length * 15)),
     })).sort((a, b) => b.latest.localeCompare(a.latest));
   }, [filtered]);
 
   const selectedTimeline = useMemo(() => {
     if (!selectedEvent) return [];
-    return (data?.events || []).filter((event) =>
-      (selectedEvent.messageId && event.messageId === selectedEvent.messageId)
-      || (selectedEvent.generatedEmailId && event.generatedEmailId === selectedEvent.generatedEmailId),
+    return (data?.events || []).filter((event) => selectedEvent.messageId
+      ? event.messageId === selectedEvent.messageId
+      : Boolean(selectedEvent.generatedEmailId && event.generatedEmailId === selectedEvent.generatedEmailId),
     ).sort((a, b) => a.date.localeCompare(b.date));
   }, [data, selectedEvent]);
   const selectedPreview = selectedEvent ? emails.find((email) => email.id === selectedEvent.generatedEmailId) : undefined;
 
   const bestHour = useMemo(() => {
     const counts = new Map<number, number>();
-    for (const event of filtered.filter((item) => openEvents.has(item.event))) {
+    for (const event of filtered.filter((item) => item.event === "opened" || item.event === "loadedByProxy")) {
       const hour = new Date(event.date).getHours();
       counts.set(hour, (counts.get(hour) || 0) + 1);
     }

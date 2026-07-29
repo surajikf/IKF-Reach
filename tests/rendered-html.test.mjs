@@ -88,6 +88,8 @@ test("statistics formulas and exports distinguish unique and total engagement", 
   assert.match(statistics, /Unique clicks/);
   assert.match(statistics, /clickRate/);
   assert.match(statistics, /ctor/);
+  assert.match(statistics, /event\.messageId \|\| event\.emailSendId \|\| event\.generatedEmailId/);
+  assert.match(statistics, /const totalOpenRows = byType\(\["opened", "loadedByProxy"\]\)/);
   assert.match(statistics, /Export CSV/);
   assert.match(statistics, /Export Excel/);
   assert.match(statistics, /Save PDF/);
@@ -95,6 +97,9 @@ test("statistics formulas and exports distinguish unique and total engagement", 
 
 test("Brevo webhook events are authenticated, deduplicated, and stored durably", () => {
   assert.match(webhookApi, /BREVO_WEBHOOK_TOKEN/);
+  assert.match(webhookApi, /Bearer /);
   assert.match(webhookApi, /INSERT OR IGNORE INTO email_analytics_events/);
   assert.match(webhookApi, /providerEventKey|provider_event_key/);
+  assert.match(statisticsApi, /canonicalEventKey/);
+  assert.match(statisticsApi, /if \(!send\) continue/);
 });

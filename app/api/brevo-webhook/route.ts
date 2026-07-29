@@ -32,11 +32,11 @@ function eventDate(event: BrevoWebhookEvent) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
 }
 
-function eventKey(event: BrevoWebhookEvent) {
+function eventKey(event: BrevoWebhookEvent, eventAt = eventDate(event)) {
   return [
     normalizeMessageId(event["message-id"] || event.messageId || event.message_id),
     normalizeEvent(event.event),
-    eventDate(event),
+    eventAt,
     String(event.email || "").toLowerCase(),
     String(event.link || event.url || ""),
     String(event.ip || ""),
@@ -58,7 +58,9 @@ export async function POST(req: NextRequest) {
   try {
     const configuredToken = process.env.BREVO_WEBHOOK_TOKEN;
     const suppliedToken = req.nextUrl.searchParams.get("token");
-    if (!configuredToken || suppliedToken !== configuredToken) {
+    const authorization = req.headers.get("authorization");
+    const bearerToken = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+    if (!configuredToken || (suppliedToken !== configuredToken && bearerToken !== configuredToken)) {
       return NextResponse.json({ ok: false, error: "Invalid webhook token." }, { status: 401 });
     }
     const body = await req.json();
@@ -79,6 +81,7 @@ export async function POST(req: NextRequest) {
     await queueDb.batch(usable.map((event) => {
       const messageId = normalizeMessageId(event["message-id"] || event.messageId || event.message_id);
       const send = sendByMessage.get(messageId) as Record<string, unknown> | undefined;
+      const eventAt = eventDate(event);
       return queueDb.prepare(`
         INSERT OR IGNORE INTO email_analytics_events (
           id, provider_event_key, campaign_id, generated_email_id, email_send_id,
@@ -87,7 +90,7 @@ export async function POST(req: NextRequest) {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         crypto.randomUUID(),
-        eventKey(event),
+        eventKey(event, eventAt),
         send?.campaign_id || null,
         send?.generated_email_id || null,
         send?.id || null,
@@ -96,7 +99,7 @@ export async function POST(req: NextRequest) {
         String(event.from || send?.sender_email || "").toLowerCase() || null,
         String(event.subject || send?.subject || "") || null,
         normalizeEvent(event.event),
-        eventDate(event),
+        eventAt,
         String(event.ip || "") || null,
         String(event.link || event.url || "") || null,
         String(event.reason || event.message || "") || null,
@@ -113,4 +116,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-

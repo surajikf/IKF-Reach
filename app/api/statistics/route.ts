@@ -51,6 +51,26 @@ function eventKey(event: Pick<AnalyticsEvent, "messageId" | "event" | "date" | "
   return [event.messageId, event.event, event.date, event.recipient, event.link, event.ip].join("|");
 }
 
+const singleOccurrenceEvents = new Set([
+  "sent", "scheduled", "delivered", "deferred", "softBounce", "hardBounce",
+  "blocked", "invalid", "error", "spam", "unsubscribed",
+]);
+
+function canonicalEventKey(event: AnalyticsEvent) {
+  if (event.messageId && singleOccurrenceEvents.has(event.event)) {
+    return `${event.messageId}|${event.event}`;
+  }
+  return eventKey(event);
+}
+
+function addEvent(events: Map<string, AnalyticsEvent>, event: AnalyticsEvent) {
+  const key = canonicalEventKey(event);
+  const existing = events.get(key);
+  const priority = { database: 0, brevo: 1, webhook: 2 };
+  event.key = key;
+  if (!existing || priority[event.source] > priority[existing.source]) events.set(key, event);
+}
+
 async function supabase(path: string) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY;
@@ -125,7 +145,9 @@ export async function GET(req: NextRequest) {
     const generatedById = new Map(generatedEmails.map((email: Record<string, unknown>) => [String(email.id), email]));
     const contactById = new Map(contacts.map((contact: Record<string, unknown>) => [String(contact.id), contact]));
     const sendByMessage = new Map<string, Record<string, unknown>>();
+    const sendById = new Map<string, Record<string, unknown>>();
     for (const send of sends) {
+      sendById.set(String(send.id), send);
       const messageId = normalizeMessageId(send.brevo_message_id);
       if (messageId) sendByMessage.set(messageId, send);
     }
@@ -165,32 +187,35 @@ export async function GET(req: NextRequest) {
         tag: String(raw.tag || ""),
         source: "brevo",
       };
-      event.key = eventKey(event);
-      events.set(event.key, event);
+      addEvent(events, event);
     }
 
     for (const row of (storedResult.results || []) as Array<Record<string, unknown>>) {
-      const campaignId = String(row.campaign_id || "") || null;
+      const messageId = normalizeMessageId(row.message_id);
+      const send = sendByMessage.get(messageId) || sendById.get(String(row.email_send_id || ""));
+      if (!send) continue;
+      const generated = generatedById.get(String(send.generated_email_id || row.generated_email_id || ""));
+      const campaignId = String(send.campaign_id || row.campaign_id || generated?.campaign_id || "") || null;
       const campaign = campaignId ? campaignById.get(campaignId) : undefined;
       const event: AnalyticsEvent = {
         key: String(row.provider_event_key || row.id),
         event: normalizeEvent(row.event),
         date: safeDate(row.event_at),
-        messageId: normalizeMessageId(row.message_id),
+        messageId,
         campaignId,
         campaignName: String(campaign?.name || "Unassigned campaign"),
-        generatedEmailId: String(row.generated_email_id || "") || null,
-        emailSendId: String(row.email_send_id || "") || null,
-        recipient: String(row.recipient_email || "").toLowerCase(),
-        sender: String(row.sender_email || "").toLowerCase(),
-        subject: String(row.subject || ""),
+        generatedEmailId: String(send.generated_email_id || row.generated_email_id || "") || null,
+        emailSendId: String(send.id || row.email_send_id || "") || null,
+        recipient: String(row.recipient_email || send.recipient_email || "").toLowerCase(),
+        sender: String(row.sender_email || send.sender_email || campaign?.sender_email || "").toLowerCase(),
+        subject: String(row.subject || send.subject || generated?.subject || ""),
         ip: String(row.ip_address || ""),
         link: String(row.link || ""),
         reason: String(row.reason || ""),
         tag: String(row.tag || ""),
         source: "webhook",
       };
-      events.set(event.key, event);
+      addEvent(events, event);
     }
 
     for (const send of sends) {
@@ -219,8 +244,7 @@ export async function GET(req: NextRequest) {
         tag: "ikf-outreach",
         source: "database",
       };
-      synthetic.key = eventKey(synthetic);
-      events.set(synthetic.key, synthetic);
+      addEvent(events, synthetic);
     }
 
     const output = [...events.values()].sort((a, b) => b.date.localeCompare(a.date));
