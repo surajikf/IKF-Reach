@@ -196,6 +196,7 @@ export async function GET(req: NextRequest) {
     try {
       availableSenders = await getBrevoSenders();
     } catch {}
+    if (availableSenders.length) brevo = true;
     if (!availableSenders.length && sender.email) availableSenders = [{ ...sender, active: brevo }];
     return NextResponse.json({
       ok: true,
