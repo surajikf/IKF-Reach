@@ -72,6 +72,19 @@ export const emailAnalyticsEvents = sqliteTable("email_analytics_events", {
   index("email_analytics_events_message_idx").on(table.messageId),
 ]);
 
+export const emailSuppressions = sqliteTable("email_suppressions", {
+  normalizedEmail: text("normalized_email").primaryKey(),
+  sourceEvent: text("source_event").notNull(),
+  reason: text("reason").notNull(),
+  messageId: text("message_id"),
+  firstSeenAt: text("first_seen_at").notNull(),
+  lastSeenAt: text("last_seen_at").notNull(),
+  active: integer("active").notNull().default(1),
+}, (table) => [
+  index("email_suppressions_active_idx").on(table.active),
+  index("email_suppressions_event_idx").on(table.sourceEvent),
+]);
+
 export const emailValidationJobs = sqliteTable("email_validation_jobs", {
   id: text("id").primaryKey(),
   status: text("status").notNull().default("queued"),

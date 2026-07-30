@@ -478,13 +478,20 @@ async function loadHistorySignals(queueDb: D1Database, emails: string[]) {
   const result = new Map<string, EmailHistorySignals>();
   if (!normalized.length) return result;
   const placeholders = normalized.map(() => "?").join(",");
-  const rows = await queueDb.prepare(`
-    SELECT lower(recipient_email) AS email, event
-    FROM email_analytics_events
-    WHERE lower(recipient_email) IN (${placeholders})
-      AND event IN ('hardBounce', 'softBounce', 'spam', 'unsubscribed', 'delivered', 'blocked', 'invalid')
-  `).bind(...normalized).all<{ email: string; event: string }>();
-  for (const row of rows.results || []) {
+  const [eventRows, suppressionRows] = await Promise.all([
+    queueDb.prepare(`
+      SELECT lower(recipient_email) AS email, event
+      FROM email_analytics_events
+      WHERE lower(recipient_email) IN (${placeholders})
+        AND event IN ('hardBounce', 'softBounce', 'spam', 'unsubscribed', 'delivered', 'blocked', 'invalid')
+    `).bind(...normalized).all<{ email: string; event: string }>(),
+    queueDb.prepare(`
+      SELECT normalized_email AS email, source_event AS event
+      FROM email_suppressions
+      WHERE active = 1 AND normalized_email IN (${placeholders})
+    `).bind(...normalized).all<{ email: string; event: string }>(),
+  ]);
+  for (const row of [...(eventRows.results || []), ...(suppressionRows.results || [])]) {
     const signals = result.get(row.email) || {};
     if (["hardBounce", "blocked", "invalid"].includes(row.event)) signals.hardBounce = true;
     if (row.event === "softBounce") signals.softBounce = true;

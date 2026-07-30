@@ -4,6 +4,7 @@ import { getQueueDb } from "../../../db";
 export const dynamic = "force-dynamic";
 
 type BrevoWebhookEvent = Record<string, unknown>;
+const permanentSuppressionEvents = new Set(["hardBounce", "blocked", "invalid", "spam", "unsubscribed"]);
 
 function normalizeMessageId(value: unknown) {
   return String(value || "").trim().replace(/^<|>$/g, "").toLowerCase();
@@ -46,6 +47,19 @@ function eventKey(event: BrevoWebhookEvent, eventAt = eventDate(event)) {
   ].join("|");
 }
 
+function suppressionReason(eventName: string, providerReason: string) {
+  if (eventName === "hardBounce") {
+    return providerReason
+      ? `This address hard-bounced and is permanently suppressed. ${providerReason}`
+      : "This address hard-bounced and is permanently suppressed.";
+  }
+  if (eventName === "spam") return "A spam complaint was recorded. This address is permanently suppressed.";
+  if (eventName === "unsubscribed") return "The recipient unsubscribed. This address is permanently suppressed.";
+  return providerReason
+    ? `This address was rejected and is permanently suppressed. ${providerReason}`
+    : "This address was rejected and is permanently suppressed.";
+}
+
 async function supabase(path: string) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY;
@@ -82,11 +96,15 @@ export async function POST(req: NextRequest) {
     );
     const queueDb = getQueueDb();
     const now = new Date().toISOString();
-    await queueDb.batch(usable.map((event) => {
+    const statements: D1PreparedStatement[] = [];
+    for (const event of usable) {
       const messageId = normalizeMessageId(event["message-id"] || event.messageId || event.message_id);
       const send = sendByMessage.get(messageId) as Record<string, unknown> | undefined;
       const eventAt = eventDate(event);
-      return queueDb.prepare(`
+      const recipientEmail = String(event.email || send?.recipient_email || "").trim().toLowerCase();
+      const eventName = normalizeEvent(event.event);
+      const providerReason = String(event.reason || event.message || "").trim();
+      statements.push(queueDb.prepare(`
         INSERT OR IGNORE INTO email_analytics_events (
           id, provider_event_key, campaign_id, generated_email_id, email_send_id,
           message_id, recipient_email, sender_email, subject, event, event_at,
@@ -99,19 +117,49 @@ export async function POST(req: NextRequest) {
         send?.generated_email_id || null,
         send?.id || null,
         messageId || null,
-        String(event.email || send?.recipient_email || "").toLowerCase(),
+        recipientEmail,
         String(event.from || send?.sender_email || "").toLowerCase() || null,
         String(event.subject || send?.subject || "") || null,
-        normalizeEvent(event.event),
+        eventName,
         eventAt,
         String(event.ip || "") || null,
         String(event.link || event.url || "") || null,
-        String(event.reason || event.message || "") || null,
+        providerReason || null,
         String(event.tag || "") || null,
         JSON.stringify(event),
         now,
-      );
-    }));
+      ));
+      if (permanentSuppressionEvents.has(eventName)) {
+        const reason = suppressionReason(eventName, providerReason);
+        statements.push(queueDb.prepare(`
+          INSERT INTO email_suppressions (
+            normalized_email, source_event, reason, message_id,
+            first_seen_at, last_seen_at, active
+          ) VALUES (?, ?, ?, ?, ?, ?, 1)
+          ON CONFLICT(normalized_email) DO UPDATE SET
+            source_event = excluded.source_event,
+            reason = excluded.reason,
+            message_id = COALESCE(excluded.message_id, email_suppressions.message_id),
+            last_seen_at = excluded.last_seen_at,
+            active = 1
+        `).bind(recipientEmail, eventName, reason, messageId || null, eventAt, eventAt));
+        statements.push(queueDb.prepare(`
+          UPDATE email_validation_results
+          SET verdict = 'invalid',
+              score = 0,
+              previous_hard_bounce = CASE WHEN ? IN ('hardBounce', 'blocked', 'invalid') THEN 1 ELSE previous_hard_bounce END,
+              complaint = CASE WHEN ? = 'spam' THEN 1 ELSE complaint END,
+              unsubscribed = CASE WHEN ? = 'unsubscribed' THEN 1 ELSE unsubscribed END,
+              reasons = ?,
+              job_id = 'provider-suppression',
+              validated_at = ?
+          WHERE normalized_email = ?
+        `).bind(eventName, eventName, eventName, JSON.stringify([reason]), eventAt, recipientEmail));
+      }
+    }
+    for (let index = 0; index < statements.length; index += 80) {
+      await queueDb.batch(statements.slice(index, index + 80));
+    }
     return NextResponse.json({ ok: true, accepted: usable.length });
   } catch (error) {
     return NextResponse.json(

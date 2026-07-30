@@ -72,10 +72,11 @@ async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
   const queueDb = getQueueDb();
   const validationRows: Array<Record<string, any>> = [];
   const eventRows: Array<Record<string, any>> = [];
+  const suppressionRows: Array<Record<string, any>> = [];
   for (const recipientBatch of chunk(recipients, 80)) {
     const contactPlaceholders = recipientBatch.map(() => "?").join(",");
     const emailPlaceholders = recipientBatch.map(() => "?").join(",");
-    const [validationResult, eventResult] = await Promise.all([
+    const [validationResult, eventResult, suppressionResult] = await Promise.all([
       queueDb.prepare(`
         SELECT contact_id, email, verdict, reasons
         FROM email_validation_results
@@ -87,9 +88,16 @@ async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
         WHERE lower(recipient_email) IN (${emailPlaceholders})
           AND event IN ('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed')
       `).bind(...recipientBatch.map((recipient) => recipient.email)).all<Record<string, any>>(),
+      queueDb.prepare(`
+        SELECT normalized_email AS email, source_event AS event, reason
+        FROM email_suppressions
+        WHERE active = 1
+          AND normalized_email IN (${emailPlaceholders})
+      `).bind(...recipientBatch.map((recipient) => recipient.email)).all<Record<string, any>>(),
     ]);
     validationRows.push(...(validationResult.results || []));
     eventRows.push(...(eventResult.results || []));
+    suppressionRows.push(...(suppressionResult.results || []));
   }
   const blocked = new Map<string, string>();
   const recipientEmailsByContactId = new Map(
@@ -123,6 +131,9 @@ async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
         ? "The recipient unsubscribed."
         : "This address previously hard-bounced or was blocked.");
   }
+  for (const row of suppressionRows) {
+    blocked.set(normalizeEmailAddress(row.email), String(row.reason || "This address is permanently suppressed."));
+  }
   if (blocked.size) {
     const samples = [...blocked.entries()].slice(0, 4).map(([email, reason]) => `${email} (${reason})`);
     throw new Error(
@@ -144,14 +155,21 @@ async function validateContactBeforeDraft(contactId: string, rawEmail: string) {
   const email = normalizeEmailAddress(rawEmail);
   const domain = emailDomain(email);
   const queueDb = getQueueDb();
-  const eventRows = await queueDb.prepare(`
-    SELECT event
-    FROM email_analytics_events
-    WHERE lower(recipient_email) = ?
-      AND event IN ('hardBounce', 'softBounce', 'blocked', 'invalid', 'spam', 'unsubscribed', 'delivered')
-  `).bind(email).all<{ event: string }>();
+  const [eventRows, suppressionRows] = await Promise.all([
+    queueDb.prepare(`
+      SELECT event
+      FROM email_analytics_events
+      WHERE lower(recipient_email) = ?
+        AND event IN ('hardBounce', 'softBounce', 'blocked', 'invalid', 'spam', 'unsubscribed', 'delivered')
+    `).bind(email).all<{ event: string }>(),
+    queueDb.prepare(`
+      SELECT source_event AS event
+      FROM email_suppressions
+      WHERE normalized_email = ? AND active = 1
+    `).bind(email).all<{ event: string }>(),
+  ]);
   const history: EmailHistorySignals = {};
-  for (const row of eventRows.results || []) {
+  for (const row of [...(eventRows.results || []), ...(suppressionRows.results || [])]) {
     if (["hardBounce", "blocked", "invalid"].includes(row.event)) history.hardBounce = true;
     if (row.event === "softBounce") history.softBounce = true;
     if (row.event === "spam") history.complaint = true;

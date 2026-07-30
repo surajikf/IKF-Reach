@@ -1921,7 +1921,7 @@ export default function Home() {
                 </div>
               )}
 
-              <div className="validation-policy-note"><strong>Validation-first campaign protection</strong><span>New addresses from documents, websites, or pasted lists are validated before a draft is created. Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent.</span></div>
+              <div className="validation-policy-note"><strong>Validation-first campaign protection</strong><span>New addresses from documents, websites, or pasted lists are validated before a draft is created. Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent. Any hard-bounced address is permanently suppressed from every future campaign.</span></div>
 
               <div className="contact-selection-summary">
                 <div><strong>{selectedContactIds.size ? `${selectedContactIds.size.toLocaleString("en-IN")} contacts selected` : "Custom validation"}</strong><span>{selectedContactIds.size ? "Validate only this hand-picked set now or schedule it for later." : "Choose individual contacts, this page, or every filtered result."}</span></div>

@@ -28,6 +28,8 @@ test("temporary DNS uncertainty is surfaced instead of guessed", () => {
 const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const control = await readFile(new URL("../app/api/control/route.ts", import.meta.url), "utf8");
 const validationApi = await readFile(new URL("../app/api/email-validation/route.ts", import.meta.url), "utf8");
+const brevoWebhook = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
+const suppressionMigration = await readFile(new URL("../drizzle/0004_large_the_phantom.sql", import.meta.url), "utf8");
 const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
 const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 
@@ -54,6 +56,19 @@ test("all approval and delivery paths enforce validation", () => {
   assert.match(control, /\["invalid", "unknown"\]\.includes/);
   assert.ok((control.match(/await assertContactsDeliverable/g) || []).length >= 9);
   assert.match(control, /event IN \('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed'\)/);
+});
+
+test("hard bounces are permanently suppressed from every future campaign", () => {
+  assert.match(brevoWebhook, /permanentSuppressionEvents/);
+  assert.match(brevoWebhook, /INSERT INTO email_suppressions/);
+  assert.match(brevoWebhook, /This address hard-bounced and is permanently suppressed/);
+  assert.match(brevoWebhook, /UPDATE email_validation_results/);
+  assert.match(control, /FROM email_suppressions/);
+  assert.match(control, /This address is permanently suppressed/);
+  assert.match(validationApi, /FROM email_suppressions/);
+  assert.match(suppressionMigration, /FROM `email_analytics_events`/);
+  assert.match(suppressionMigration, /WHERE `event` IN \('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed'\)/);
+  assert.match(page, /Any hard-bounced address is permanently suppressed from every future campaign/);
 });
 
 test("validation runs in durable batches and can be scheduled while the browser is closed", () => {
