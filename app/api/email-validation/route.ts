@@ -15,6 +15,9 @@ export const dynamic = "force-dynamic";
 const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
 const supabaseUrl = () => process.env.SUPABASE_URL || "";
 const supabaseKey = () => process.env.SUPABASE_SECRET_KEY || "";
+const validationBatchSize = 100;
+const validationAttemptLimit = 3;
+const validationLeaseMs = 2 * 60_000;
 
 function actor(req: NextRequest) {
   return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
@@ -201,9 +204,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: "Schedule validation at least 1 minute from now, or choose Run now." }, { status: 400 });
       }
 
-      const requestedIds = Array.isArray(body.contactIds)
+      const hasRequestedIds = Array.isArray(body.contactIds);
+      const requestedIds = hasRequestedIds
         ? body.contactIds.map(String).filter((value) => /^[0-9a-f-]{36}$/i.test(value))
         : [];
+      if (hasRequestedIds && !requestedIds.length) {
+        return NextResponse.json({ ok: false, error: "Choose at least one valid contact to validate." }, { status: 400 });
+      }
       const contacts = await loadContactsForValidation(requestedIds);
       if (!contacts.length) {
         return NextResponse.json({ ok: false, error: "No contacts with email addresses were found." }, { status: 400 });
@@ -288,6 +295,26 @@ async function processValidationBatch(queueDb: D1Database, jobId: string) {
   }
 
   const now = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - validationLeaseMs).toISOString();
+  // A Worker can be interrupted after it has claimed a batch. Requeue expired
+  // claims so an interrupted invocation never leaves the job permanently stuck.
+  await queueDb.prepare(`
+    UPDATE email_validation_items
+    SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+        error = CASE
+          WHEN attempts >= ? THEN COALESCE(error, 'Validation could not finish after three attempts.')
+          ELSE COALESCE(error, 'Recovered after an interrupted validation batch.')
+        END,
+        updated_at = ?
+    WHERE job_id = ? AND status = 'running' AND updated_at < ?
+  `).bind(
+    validationAttemptLimit,
+    validationAttemptLimit,
+    now,
+    jobId,
+    staleBefore,
+  ).run();
+
   await queueDb.prepare(`
     UPDATE email_validation_jobs
     SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
@@ -298,16 +325,42 @@ async function processValidationBatch(queueDb: D1Database, jobId: string) {
     SELECT * FROM email_validation_items
     WHERE job_id = ? AND status = 'queued'
     ORDER BY created_at ASC
-    LIMIT 50
-  `).bind(jobId).all<Record<string, unknown>>();
-  const items = itemRows.results || [];
-  if (!items.length) return finishValidationJob(queueDb, jobId);
+    LIMIT ?
+  `).bind(jobId, validationBatchSize).all<Record<string, unknown>>();
+  const candidates = itemRows.results || [];
+  if (!candidates.length) {
+    await refreshJobCounts(queueDb, jobId);
+    const active = await queueDb.prepare(`
+      SELECT COUNT(*) AS count
+      FROM email_validation_items
+      WHERE job_id = ? AND status IN ('queued', 'running')
+    `).bind(jobId).first<{ count: number }>();
+    const remaining = Number(active?.count || 0);
+    return remaining
+      ? { jobId, status: "running", processed: 0, remaining }
+      : finishValidationJob(queueDb, jobId);
+  }
 
-  await queueDb.batch(items.map((item) => queueDb.prepare(`
+  const claimId = `claim:${crypto.randomUUID()}`;
+  await queueDb.batch(candidates.map((item) => queueDb.prepare(`
     UPDATE email_validation_items
-    SET status = 'running', attempts = attempts + 1, updated_at = ?
+    SET status = 'running', attempts = attempts + 1, error = ?, updated_at = ?
     WHERE id = ? AND status = 'queued'
-  `).bind(now, item.id)));
+  `).bind(claimId, now, item.id)));
+  const claimedRows = await queueDb.prepare(`
+    SELECT * FROM email_validation_items
+    WHERE job_id = ? AND status = 'running' AND error = ?
+    ORDER BY created_at ASC
+  `).bind(jobId, claimId).all<Record<string, unknown>>();
+  const items = claimedRows.results || [];
+  if (!items.length) {
+    const active = await queueDb.prepare(`
+      SELECT COUNT(*) AS count
+      FROM email_validation_items
+      WHERE job_id = ? AND status IN ('queued', 'running')
+    `).bind(jobId).first<{ count: number }>();
+    return { jobId, status: "running", processed: 0, remaining: Number(active?.count || 0) };
+  }
 
   const histories = await loadHistorySignals(queueDb, items.map((item) => String(item.email)));
   const domains = [...new Set(items.map((item) => emailDomain(item.email)).filter(Boolean))];
@@ -333,11 +386,17 @@ async function processValidationBatch(queueDb: D1Database, jobId: string) {
   const statements: D1PreparedStatement[] = [];
   for (const outcome of outcomes) {
     if ("error" in outcome) {
+      const attempts = Number(outcome.item.attempts || 0);
       statements.push(queueDb.prepare(`
         UPDATE email_validation_items
-        SET status = 'failed', error = ?, updated_at = ?
+        SET status = ?, error = ?, updated_at = ?
         WHERE id = ?
-      `).bind(outcome.error, completedAt, outcome.item.id));
+      `).bind(
+        attempts >= validationAttemptLimit ? "failed" : "queued",
+        outcome.error,
+        completedAt,
+        outcome.item.id,
+      ));
       continue;
     }
     statements.push(resultUpsert(queueDb, jobId, String(outcome.item.contact_id), outcome.result, completedAt));
@@ -351,7 +410,7 @@ async function processValidationBatch(queueDb: D1Database, jobId: string) {
   await refreshJobCounts(queueDb, jobId);
   const remainingRow = await queueDb.prepare(`
     SELECT COUNT(*) AS count FROM email_validation_items
-    WHERE job_id = ? AND status = 'queued'
+    WHERE job_id = ? AND status IN ('queued', 'running')
   `).bind(jobId).first<{ count: number }>();
   const remaining = Number(remainingRow?.count || 0);
   if (!remaining) return finishValidationJob(queueDb, jobId);

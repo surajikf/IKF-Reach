@@ -31,8 +31,11 @@ const validationApi = await readFile(new URL("../app/api/email-validation/route.
 const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
 const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 
-test("contacts UI exposes validation, scheduling, progress, and quarantine", () => {
+test("contacts UI exposes validation, custom selection, scheduling, progress, and quarantine", () => {
   assert.match(page, /Validate emails/);
+  assert.match(page, /Select all filtered/);
+  assert.match(page, /Validate only this hand-picked set/);
+  assert.match(page, /contactIds/);
   assert.match(page, /Schedule validation/);
   assert.match(page, /Quarantined/);
   assert.match(page, /No probe email is sent/);
@@ -54,11 +57,15 @@ test("all approval and delivery paths enforce validation", () => {
 });
 
 test("validation runs in durable batches and can be scheduled while the browser is closed", () => {
-  assert.match(validationApi, /LIMIT 50/);
+  assert.match(validationApi, /validationBatchSize = 100/);
+  assert.match(validationApi, /Recovered after an interrupted validation batch/);
+  assert.match(validationApi, /claim:\$\{crypto\.randomUUID\(\)\}/);
+  assert.match(validationApi, /status IN \('queued', 'running'\)/);
   assert.match(validationApi, /email_domain_validation_cache/);
   assert.match(validationApi, /cloudflare-dns\.com\/dns-query/);
   assert.match(worker, /async scheduled/);
   assert.match(worker, /runEmailValidationBatch/);
+  assert.match(worker, /continueEmailValidation/);
   assert.match(worker, /kickNextEmailValidationBatch/);
   assert.match(vite, /crons: \["\* \* \* \* \*"\]/);
 });

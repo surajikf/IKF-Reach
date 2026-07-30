@@ -832,6 +832,13 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .validation-setup { display: grid; grid-template-columns: minmax(260px, 1fr) auto minmax(220px, auto); align-items: end; gap: 18px; }
 .validation-setup > div:first-child { align-self: center; }
 .validation-setup > div:first-child p:last-child { max-width: 680px; margin: 6px 0 0; }
+.validation-scope { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 8px; grid-column: 1 / -1; }
+.validation-scope button { display: grid; gap: 3px; min-height: 64px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: #4e5866; text-align: left; cursor: pointer; }
+.validation-scope button strong { color: var(--ink); font-size: 14px; }
+.validation-scope button span { color: var(--muted); font-size: 12px; }
+.validation-scope button.active { border-color: #7566ff; background: #efedff; box-shadow: 0 0 0 1px #7566ff inset; }
+.validation-scope button.active strong { color: #493bd2; }
+.validation-scope button:disabled { opacity: .5; cursor: not-allowed; }
 .validation-mode { display: flex; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .validation-mode button { min-height: 38px; padding: 8px 15px; border: 0; border-radius: 7px; background: transparent; color: #596371; font-weight: 700; }
 .validation-mode button.active { background: #5c4be5; color: #fff; }
@@ -843,6 +850,16 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .validation-policy-note { display: flex; align-items: center; gap: 14px; margin: 16px 20px; padding: 13px 15px; border: 1px solid #bfe7d8; border-radius: 12px; background: #effaf6; }
 .validation-policy-note strong { color: #146c50; white-space: nowrap; }
 .validation-policy-note span { color: #426258; font-size: 13px; line-height: 1.45; }
+.contact-selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 20px 14px; padding: 12px 14px; border: 1px solid #ddd9f8; border-radius: 11px; background: #faf9ff; }
+.contact-selection-summary > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.contact-selection-summary > div:first-child strong { color: #322a73; }
+.contact-selection-summary > div:first-child span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.contact-selection-summary > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.contact-selection-summary button { min-height: 36px; padding: 6px 10px; border: 1px solid #d6d1f8; border-radius: 8px; background: #fff; color: #5043c6; font-size: 12px; font-weight: 800; cursor: pointer; }
+.contact-selection-summary button:hover { border-color: #9e95ed; background: #f1efff; }
+.contact-selection-summary button.selection-clear { border-color: #e1e4e8; color: #69727e; }
+.contact-select-cell { width: 46px !important; min-width: 46px; padding-inline: 14px 6px !important; text-align: center !important; }
+.contact-select-cell input, .mobile-contact-select input { width: 18px; height: 18px; accent-color: #5c4be5; cursor: pointer; }
 .validation-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 999px; font-size: 12px; font-weight: 800; white-space: nowrap; }
 .validation-pill small { font-size: 11px; opacity: .75; }
 .validation-pill.valid { background: #e5f7ef; color: #087654; }
@@ -886,9 +903,12 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
   .contact-list-controls label { justify-content: flex-end; }
   .validation-job-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .validation-setup { grid-template-columns: 1fr; }
+  .validation-scope { grid-column: auto; }
   .validation-setup-actions { grid-column: auto; }
   .validation-policy-note { align-items: flex-start; flex-direction: column; }
   .validation-policy-note strong { white-space: normal; }
+  .contact-selection-summary { align-items: stretch; flex-direction: column; }
+  .contact-selection-summary > div:last-child { justify-content: flex-start; }
   .campaign-delete-confirmation > div { display: grid; grid-template-columns: 1fr; }
   .company-profile-summary { grid-template-columns: 1fr; }
   .company-profile-summary span { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -1263,6 +1283,7 @@ button, .primary-action, .quiet-action, .text-button, .refresh-button { min-heig
   .contact-mobile-card { display: grid; gap: 12px; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
   .contact-mobile-card.quarantined-row { border-color: #efcbd1; background: #fff9fa; }
   .contact-mobile-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .mobile-contact-select { display: grid; place-items: center; flex: 0 0 auto; padding-top: 2px; }
   .contact-mobile-heading > div { display: grid; gap: 4px; min-width: 0; }
   .contact-mobile-heading strong { font-size: 16px; }
   .contact-mobile-heading a { color: var(--accent); overflow-wrap: anywhere; }
@@ -1284,6 +1305,10 @@ button, .primary-action, .quiet-action, .text-button, .refresh-button { min-heig
   .validate-email-button, .company-list-controls .view-toggle { grid-column: auto; }
   .validation-tabs { display: grid; grid-template-columns: 1fr 1fr; overflow: visible; }
   .validation-tabs button { min-height: 44px; justify-content: space-between; }
+  .validation-scope { grid-template-columns: 1fr; }
+  .contact-selection-summary { margin-inline: 12px; }
+  .contact-selection-summary > div:last-child { display: grid; grid-template-columns: 1fr; }
+  .contact-selection-summary button { width: 100%; min-height: 42px; }
   .panel-heading { gap: 14px; }
   .pagination { align-items: stretch; flex-direction: column; }
   .pagination > div { display: grid; grid-template-columns: 1fr 1fr; }

@@ -25,6 +25,10 @@ interface ScheduledController {
   cron: string;
 }
 
+const validationOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
+const validationContinuationBatches = 2;
+const validationContinuationMs = 22_000;
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -114,9 +118,12 @@ const worker = {
       if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
         return Response.json({ ok: false, error: "A valid validation job is required." }, { status: 400 });
       }
+      if (!canStartEmailValidation(request, env, jobId)) {
+        return Response.json({ ok: false, error: "Email validation worker authorization failed." }, { status: 403 });
+      }
       const progress = await runEmailValidationBatch(request.url, jobId, env, ctx);
       if (Number(progress.remaining || 0) > 0) {
-        ctx.waitUntil(kickNextEmailValidationBatch(request.url, jobId, env.SUPABASE_SECRET_KEY));
+        ctx.waitUntil(continueEmailValidation(request.url, jobId, env, ctx, true));
       }
       return Response.json({ ok: true, accepted: true, jobId, ...progress }, { status: 202 });
     }
@@ -146,10 +153,20 @@ const worker = {
       LIMIT 4
     `).bind(new Date().toISOString()).all<{ id: string }>();
     for (const job of dueJobs.results || []) {
-      ctx.waitUntil(runEmailValidationBatch("https://scheduled.ikf.local", job.id, env, ctx));
+      // The minute heartbeat is a durable fallback for scheduled jobs and for
+      // any continuation request interrupted by the platform.
+      ctx.waitUntil(continueEmailValidation("https://scheduled.ikf.local", job.id, env, ctx, false));
     }
   },
 };
+
+function canStartEmailValidation(request: Request, env: Env, jobId: string) {
+  const actor = request.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
+  const internal = request.headers.get("x-ikf-validation-job") === jobId
+    && Boolean(env.SUPABASE_SECRET_KEY)
+    && request.headers.get("x-ikf-validation-token") === env.SUPABASE_SECRET_KEY;
+  return validationOperators.has(actor) || internal;
+}
 
 async function runBackgroundCampaignBatch(
   requestUrl: string,
@@ -219,8 +236,32 @@ async function runEmailValidationBatch(
   return response.json() as Promise<{ remaining?: number; status?: string }>;
 }
 
+async function continueEmailValidation(
+  requestUrl: string,
+  jobId: string,
+  env: Env,
+  ctx: ExecutionContext,
+  allowNetworkHandoff: boolean,
+) {
+  const deadline = Date.now() + validationContinuationMs;
+  let batches = 0;
+  let progress: { remaining?: number; status?: string } = { remaining: 1 };
+  while (
+    Number(progress.remaining || 0) > 0
+    && batches < validationContinuationBatches
+    && Date.now() < deadline
+  ) {
+    progress = await runEmailValidationBatch(requestUrl, jobId, env, ctx);
+    batches += 1;
+  }
+  if (allowNetworkHandoff && Number(progress.remaining || 0) > 0) {
+    await kickNextEmailValidationBatch(requestUrl, jobId, env.SUPABASE_SECRET_KEY);
+  }
+  return progress;
+}
+
 async function kickNextEmailValidationBatch(requestUrl: string, jobId: string, token: string) {
-  await fetch(new URL("/api/background-email-validation", requestUrl), {
+  const response = await fetch(new URL("/api/background-email-validation", requestUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -229,6 +270,9 @@ async function kickNextEmailValidationBatch(requestUrl: string, jobId: string, t
     },
     body: JSON.stringify({ jobId }),
   });
+  if (!response.ok) {
+    throw new Error(`Email validation continuation failed (${response.status}).`);
+  }
 }
 
 export default worker;

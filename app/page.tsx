@@ -277,7 +277,10 @@ export default function Home() {
   const [validationPanelOpen, setValidationPanelOpen] = useState(false);
   const [validationScheduleMode, setValidationScheduleMode] = useState<"now" | "schedule">("now");
   const [validationScheduledFor, setValidationScheduledFor] = useState("");
+  const [validationScope, setValidationScope] = useState<"unchecked" | "selected" | "all">("unchecked");
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
   const backgroundKickoffsRef = useRef(new Map<string, number>());
+  const validationKickoffsRef = useRef(new Map<string, number>());
   const pageSize = 20;
 
   async function loadControl() {
@@ -327,6 +330,25 @@ export default function Home() {
     if (!active) return;
     const timer = window.setInterval(loadValidation, 3000);
     return () => window.clearInterval(timer);
+  }, [validationData?.jobs]);
+
+  useEffect(() => {
+    const now = Date.now();
+    for (const job of (validationData?.jobs || [])) {
+      if (!["queued", "running"].includes(job.status)) continue;
+      const lastKickoff = validationKickoffsRef.current.get(job.id) || 0;
+      const updatedAt = new Date(job.updatedAt || job.startedAt || job.createdAt).getTime();
+      const stalled = Number.isFinite(updatedAt) && now - updatedAt > 90_000;
+      if (now - lastKickoff < 60_000 || (job.status !== "queued" && !stalled)) continue;
+      validationKickoffsRef.current.set(job.id, now);
+      void fetch("/api/background-email-validation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: job.id }),
+      }).then((response) => {
+        if (!response.ok) validationKickoffsRef.current.delete(job.id);
+      }).catch(() => validationKickoffsRef.current.delete(job.id));
+    }
   }, [validationData?.jobs]);
 
   useEffect(() => {
@@ -389,6 +411,16 @@ export default function Home() {
     setWorking(true);
     setNotice("");
     try {
+      let contactIds: string[] | undefined;
+      if (validationScope === "selected") {
+        contactIds = [...selectedContactIds];
+        if (!contactIds.length) throw new Error("Select at least one contact to validate.");
+      } else if (validationScope === "unchecked") {
+        contactIds = displayContacts
+          .filter((contact) => !validationByContact.has(contact.id))
+          .map((contact) => contact.id);
+        if (!contactIds.length) throw new Error("Every contact has already been checked. Choose All contacts to revalidate them.");
+      }
       let scheduledFor: string | null = null;
       if (validationScheduleMode === "schedule") {
         const scheduledDate = new Date(validationScheduledFor);
@@ -403,7 +435,7 @@ export default function Home() {
       const response = await fetch("/api/email-validation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "queue", scheduledFor }),
+        body: JSON.stringify({ action: "queue", scheduledFor, contactIds }),
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || "Email validation could not be queued.");
@@ -416,6 +448,7 @@ export default function Home() {
       }
       setValidationPanelOpen(false);
       setValidationScheduledFor("");
+      setSelectedContactIds(new Set());
       setNoticeTone("success");
       setNotice(scheduledFor
         ? `Email validation is scheduled for ${new Date(scheduledFor).toLocaleString("en-IN")}. It will run with the dashboard closed.`
@@ -488,6 +521,27 @@ export default function Home() {
   const contactPages = Math.max(1, Math.ceil(filteredContacts.length / contactPageSize));
   const safeContactPage = Math.min(contactPage, contactPages);
   const pagedContacts = filteredContacts.slice((safeContactPage - 1) * contactPageSize, safeContactPage * contactPageSize);
+  const pageContactIds = pagedContacts.map((contact) => contact.id);
+  const pageContactsSelected = pageContactIds.length > 0 && pageContactIds.every((id) => selectedContactIds.has(id));
+  const toggleContactSelection = (contactId: string) => {
+    setSelectedContactIds((current) => {
+      const next = new Set(current);
+      if (next.has(contactId)) next.delete(contactId);
+      else next.add(contactId);
+      return next;
+    });
+  };
+  const togglePageContactSelection = () => {
+    setSelectedContactIds((current) => {
+      const next = new Set(current);
+      if (pageContactsSelected) pageContactIds.forEach((id) => next.delete(id));
+      else pageContactIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+  const selectAllFilteredContacts = () => {
+    setSelectedContactIds(new Set(filteredContacts.map((contact) => contact.id)));
+  };
   const filteredCompanies = useMemo(() => {
     const term = search.trim().toLowerCase();
     return displayCompanies.filter((company) => {
@@ -1815,8 +1869,8 @@ export default function Home() {
                 <div className="contact-list-controls">
                   <label><span>Industry</span><select value={contactIndustry} onChange={(event) => { setContactIndustry(event.target.value); setContactPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label>
                   <label><span>Rows per page</span><select value={contactPageSize} onChange={(event) => { setContactPageSize(Number(event.target.value)); setContactPage(1); }}><option value={50}>50</option><option value={100}>100</option><option value={1000}>1,000</option></select></label>
-                  <button type="button" className="primary-action validate-email-button" disabled={!control?.canManage || working || Boolean(activeValidationJob)} onClick={() => setValidationPanelOpen(true)} title={control?.canManage ? "Validate contacts without sending probe emails" : "Sign in with an authorized IKF account"}>
-                    {activeValidationJob ? "Validation active" : "Validate emails"}
+                  <button type="button" className="primary-action validate-email-button" disabled={!control?.canManage || working || Boolean(activeValidationJob)} onClick={() => { if (selectedContactIds.size) setValidationScope("selected"); setValidationPanelOpen(true); }} title={control?.canManage ? "Validate contacts without sending probe emails" : "Sign in with an authorized IKF account"}>
+                    {activeValidationJob ? "Validation active" : selectedContactIds.size ? `Validate selected (${selectedContactIds.size})` : "Validate emails"}
                   </button>
                 </div>
               </div>
@@ -1855,26 +1909,39 @@ export default function Home() {
 
               {validationPanelOpen && !activeValidationJob && (
                 <div className="validation-setup">
-                  <div><p className="eyebrow">Safe validation</p><h3>Check all contacts before the next campaign</h3><p>Checks email format, domain and MX records, disposable domains, role inboxes, and previous Brevo delivery history. No probe email is sent.</p></div>
+                  <div><p className="eyebrow">Safe validation</p><h3>Choose which contacts to check</h3><p>Checks email format, domain and MX records, disposable domains, role inboxes, and previous Brevo delivery history. No probe email is sent.</p></div>
+                  <div className="validation-scope" role="group" aria-label="Contacts to validate">
+                    <button type="button" className={validationScope === "unchecked" ? "active" : ""} onClick={() => setValidationScope("unchecked")}><strong>Not checked</strong><span>{validationCounts.unchecked.toLocaleString("en-IN")} contacts</span></button>
+                    <button type="button" className={validationScope === "selected" ? "active" : ""} disabled={!selectedContactIds.size} onClick={() => setValidationScope("selected")}><strong>Selected</strong><span>{selectedContactIds.size.toLocaleString("en-IN")} contacts</span></button>
+                    <button type="button" className={validationScope === "all" ? "active" : ""} onClick={() => setValidationScope("all")}><strong>All contacts</strong><span>Recheck {displayContacts.length.toLocaleString("en-IN")}</span></button>
+                  </div>
                   <div className="validation-mode" role="group" aria-label="Validation timing"><button type="button" className={validationScheduleMode === "now" ? "active" : ""} onClick={() => setValidationScheduleMode("now")}>Run now</button><button type="button" className={validationScheduleMode === "schedule" ? "active" : ""} onClick={() => setValidationScheduleMode("schedule")}>Schedule</button></div>
                   {validationScheduleMode === "schedule" && <label className="validation-date"><span>Start date and time</span><input type="datetime-local" value={validationScheduledFor} onChange={(event) => setValidationScheduledFor(event.target.value)} /></label>}
-                  <div className="validation-setup-actions"><button type="button" onClick={() => setValidationPanelOpen(false)}>Cancel</button><button type="button" className="primary-action" disabled={working || !control?.canManage} onClick={startEmailValidation}>{working ? "Queuing…" : validationScheduleMode === "schedule" ? "Schedule validation" : "Validate all contacts"}</button></div>
+                  <div className="validation-setup-actions"><button type="button" onClick={() => setValidationPanelOpen(false)}>Cancel</button><button type="button" className="primary-action" disabled={working || !control?.canManage || (validationScope === "selected" && !selectedContactIds.size) || (validationScope === "unchecked" && !validationCounts.unchecked)} onClick={startEmailValidation}>{working ? "Queuing…" : validationScheduleMode === "schedule" ? "Schedule validation" : validationScope === "selected" ? `Validate ${selectedContactIds.size} selected` : validationScope === "unchecked" ? `Validate ${validationCounts.unchecked} not checked` : "Validate all contacts"}</button></div>
                 </div>
               )}
 
               <div className="validation-policy-note"><strong>Validation-first campaign protection</strong><span>New addresses from documents, websites, or pasted lists are validated before a draft is created. Invalid addresses remain in Quarantined and cannot be approved, scheduled, or sent.</span></div>
 
-              <div className="table-wrap contacts-table-wrap"><table className="contacts-table"><thead><tr><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
+              <div className="contact-selection-summary">
+                <div><strong>{selectedContactIds.size ? `${selectedContactIds.size.toLocaleString("en-IN")} contacts selected` : "Custom validation"}</strong><span>{selectedContactIds.size ? "Validate only this hand-picked set now or schedule it for later." : "Choose individual contacts, this page, or every filtered result."}</span></div>
+                <div>
+                  <button type="button" onClick={() => setSelectedContactIds(new Set(pageContactIds))}>Select this page ({pageContactIds.length.toLocaleString("en-IN")})</button>
+                  <button type="button" onClick={selectAllFilteredContacts}>Select all filtered ({filteredContacts.length.toLocaleString("en-IN")})</button>
+                  {selectedContactIds.size > 0 && <button type="button" className="selection-clear" onClick={() => setSelectedContactIds(new Set())}>Clear</button>}
+                </div>
+              </div>
+              <div className="table-wrap contacts-table-wrap"><table className="contacts-table"><thead><tr><th className="contact-select-cell"><input type="checkbox" checked={pageContactsSelected} onChange={togglePageContactSelection} aria-label={pageContactsSelected ? "Clear contacts on this page" : "Select contacts on this page"} /></th><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
-                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
+                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td className="contact-select-cell"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /></td><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
                 })}
               </tbody></table></div>
               <div className="contact-card-list">
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
                   return <article key={`mobile-${contact.id}`} className={validation?.verdict === "invalid" ? "contact-mobile-card quarantined-row" : "contact-mobile-card"}>
-                    <div className="contact-mobile-heading"><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} /></div>
+                    <div className="contact-mobile-heading"><label className="mobile-contact-select"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /><span /></label><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} /></div>
                     <dl><div><dt>Company</dt><dd>{contact.company}</dd></div><div><dt>Industry</dt><dd>{contact.industry || "Not classified"}</dd></div><div><dt>Confidence</dt><dd><StatusPill value={contact.confidence} /></dd></div></dl>
                     {validation?.reasons?.[0] && <p className="validation-reason">{validation.reasons[0]}</p>}
                     <button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)}>Edit contact</button>
