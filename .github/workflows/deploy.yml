@@ -1,0 +1,36 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to Contabo Server
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Execute Deployment Commands via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            export PATH=/opt/plesk/node/24/bin:$PATH
+            cd /var/www/vhosts/ikf-reach.ikf.in/httpdocs
+            
+            echo "Pulling latest code from main..."
+            git pull origin main
+            
+            echo "Installing dependencies..."
+            npm install
+            
+            echo "Building application..."
+            npm run build
+            
+            echo "Restarting PM2 process..."
+            pm2 restart ikf-reach
+            
+            echo "Deployment successful!"
