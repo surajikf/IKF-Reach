@@ -30,8 +30,8 @@ const control = await readFile(new URL("../app/api/control/route.ts", import.met
 const validationApi = await readFile(new URL("../app/api/email-validation/route.ts", import.meta.url), "utf8");
 const brevoWebhook = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
 const suppressionMigration = await readFile(new URL("../drizzle/0004_large_the_phantom.sql", import.meta.url), "utf8");
-const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
-const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+const backgroundValidationApi = await readFile(new URL("../app/api/background-email-validation/route.ts", import.meta.url), "utf8");
+const startServer = await readFile(new URL("../scripts/start-server.mjs", import.meta.url), "utf8");
 
 test("contacts UI exposes validation, custom selection, scheduling, progress, and quarantine", () => {
   assert.match(page, /Validate emails/);
@@ -85,9 +85,10 @@ test("validation runs in durable batches and can be scheduled while the browser 
   assert.match(validationApi, /status IN \('queued', 'running'\)/);
   assert.match(validationApi, /email_domain_validation_cache/);
   assert.match(validationApi, /cloudflare-dns\.com\/dns-query/);
-  assert.match(worker, /async scheduled/);
-  assert.match(worker, /runEmailValidationBatch/);
-  assert.match(worker, /continueEmailValidation/);
-  assert.match(worker, /kickNextEmailValidationBatch/);
-  assert.match(vite, /crons: \["\* \* \* \* \*"\]/);
+  assert.match(backgroundValidationApi, /async function runEmailValidationBatch/);
+  assert.match(backgroundValidationApi, /async function continueEmailValidation/);
+  assert.match(backgroundValidationApi, /async function kickNextEmailValidationBatch/);
+  assert.match(startServer, /tickScheduledValidation/);
+  assert.match(startServer, /setInterval/);
+  assert.match(startServer, /CRON_INTERVAL_MS = 60_000/);
 });

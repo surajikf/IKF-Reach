@@ -41,5 +41,6 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/data/
 /.openai/*.tar.gz
 /.openai/dev-ui*.log

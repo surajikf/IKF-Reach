@@ -8,11 +8,10 @@ const api = await readFile(new URL("../app/api/control/route.ts", import.meta.ur
 const richEditor = await readFile(new URL("../app/rich-email-editor.tsx", import.meta.url), "utf8");
 const richTemplate = await readFile(new URL("../app/lib/email-template.ts", import.meta.url), "utf8");
 const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
-const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+const backgroundCampaignApi = await readFile(new URL("../app/api/background-campaign/route.ts", import.meta.url), "utf8");
 const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
 const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", import.meta.url), "utf8");
 const webhookApi = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
-const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
 
 test("campaign creation exposes durable background research and verified sender selection", () => {
   assert.match(page, /Save as draft campaign/);
@@ -52,14 +51,11 @@ test("worker continues campaign research independently of the browser", () => {
   assert.match(page, /Queued for automatic retry/);
   assert.match(page, /Latest generation report/);
   assert.match(page, /All database contacts/);
-  assert.match(worker, /const progress = await runBackgroundCampaignBatch/);
-  assert.match(worker, /ctx\.waitUntil\(kickNextBackgroundBatch/);
-  assert.match(worker, /handler\.fetch\(controlRequest\(\), env, ctx\)/);
-  assert.match(worker, /body\.retryFailed === true/);
-  assert.match(worker, /Final automatic retry queued/);
-  assert.match(worker, /x-ikf-background-token/);
-  assert.match(worker, /\/api\/background-campaign/);
-  assert.match(viteConfig, /global_fetch_strictly_public/);
+  assert.match(backgroundCampaignApi, /const progress = await runBackgroundCampaignBatch/);
+  assert.match(backgroundCampaignApi, /void kickNextBackgroundBatch/);
+  assert.match(backgroundCampaignApi, /body\.retryFailed === true/);
+  assert.match(backgroundCampaignApi, /Final automatic retry queued/);
+  assert.match(backgroundCampaignApi, /x-ikf-background-token/);
 });
 
 test("campaign email workspace can select and approve the complete campaign safely", () => {
@@ -162,7 +158,7 @@ test("authorized operators can stop durable background research safely", () => {
   assert.match(api, /cancel_background_campaign/);
   assert.match(api, /SET status = 'cancelled'/);
   assert.match(api, /assertBackgroundJobActive/);
-  assert.match(worker, /if \(progress\.remaining\)/);
+  assert.match(backgroundCampaignApi, /if \(progress\.remaining\)/);
 });
 
 test("campaign audience permits safe deletion of unsent generated emails only", () => {

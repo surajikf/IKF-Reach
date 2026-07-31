@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getQueueDb } from "../../../db";
+import { getQueueDb, type D1PreparedStatement } from "../../../db";
 
 export const dynamic = "force-dynamic";
 

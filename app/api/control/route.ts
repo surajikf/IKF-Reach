@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getQueueDb } from "../../../db";
+import { getQueueDb, type D1Database } from "../../../db";
 import { buildCampaignSchedule, insideIndiaWindow } from "../../lib/schedule";
 import { inferContactName } from "../../lib/name";
 import {

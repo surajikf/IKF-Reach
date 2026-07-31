@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getQueueDb } from "../../../db";
+import { getQueueDb, type D1Database, type D1PreparedStatement } from "../../../db";
 import {
   emailDomain,
   isPracticalEmailSyntax,
@@ -158,6 +158,23 @@ async function readValidationData(queueDb: D1Database) {
 export async function GET(req: NextRequest) {
   try {
     const queueDb = getQueueDb();
+
+    // Lightweight path for the self-hosted scheduler heartbeat (replaces the
+    // Cloudflare Cron Trigger's scheduled() handler) — just the IDs of jobs
+    // due to run or still in flight, nothing else.
+    if (req.nextUrl.searchParams.get("dueJobsOnly") === "1") {
+      const due = await queueDb.prepare(`
+        SELECT id
+        FROM email_validation_jobs
+        WHERE (
+          status = 'scheduled' AND scheduled_for <= ?
+        ) OR status IN ('queued', 'running')
+        ORDER BY created_at ASC
+        LIMIT 4
+      `).bind(new Date().toISOString()).all<{ id: string }>();
+      return NextResponse.json({ ok: true, jobIds: (due.results || []).map((row) => row.id) });
+    }
+
     return NextResponse.json({
       ok: true,
       canManage: canManage(req),
