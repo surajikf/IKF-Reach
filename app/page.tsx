@@ -43,7 +43,7 @@ type ControlData = {
 
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: "overview", label: "Overview", icon: "⌂" },
-  { id: "create", label: "Create outreach", icon: "+" },
+  { id: "create", label: "Create Campaign", icon: "+" },
   { id: "campaigns", label: "Campaigns", icon: "▦" },
   { id: "statistics", label: "Statistics", icon: "↗" },
   { id: "contacts", label: "Contacts", icon: "◎" },
@@ -214,6 +214,19 @@ function EmailTable({ rows, onOpen, compact = false, selected, onSelect, onDelet
 
 export default function Home() {
   const [section, setSection] = useState<Section>("overview");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("ikf_reach_section");
+      if (saved) {
+        setSection(saved as Section);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("ikf_reach_section", section);
+  }, [section]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [emailStatus, setEmailStatus] = useState("all");
@@ -236,8 +249,8 @@ export default function Home() {
   const [bulkMode, setBulkMode] = useState<"schedule" | "send" | "test" | null>(null);
   const [bulkForm, setBulkForm] = useState({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
   const [intakeForm, setIntakeForm] = useState({
-    campaignName: "AI Native Thinking Masterclass Outreach",
-    topic: "AI Native Thinking Masterclass",
+    campaignName: "",
+    topic: "",
     emailTemplate: `<p>Dear <span class="personalization-chip" data-personalization="name" contenteditable="false">{{name}}</span>,</p>
 <p>While reviewing <strong><u><span class="personalization-chip" data-personalization="company" contenteditable="false">{{company}}</span></u></strong>, I noted its focus on <span class="personalization-chip" data-personalization="research" contenteditable="false">{{research}}</span>. This creates a relevant opportunity to apply <strong><span class="personalization-chip" data-personalization="topic" contenteditable="false">{{topic}}</span></strong> thinking across <span class="personalization-chip" data-personalization="focus_areas" contenteditable="false">{{focus_areas}}</span>.</p>
 <p>We would be delighted to conduct a practical <strong><span class="personalization-chip" data-personalization="topic" contenteditable="false">{{topic}}</span></strong> session tailored to your leadership and functional teams.</p>
@@ -251,11 +264,37 @@ export default function Home() {
     senderEmail: "tanishka@iknowai.in",
     replyToEmail: "tanishka@iknowai.in",
   });
+  const [currentStep, setCurrentStep] = useState(1);
+
+  // Auto-save intakeForm to localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem("ikf_reach_draft");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          setIntakeForm(parsed);
+        }
+      } catch (e) {
+        console.error("Failed to parse saved draft", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("ikf_reach_draft", JSON.stringify(intakeForm));
+  }, [intakeForm]);
+
   const [replyToChoice, setReplyToChoice] = useState("sender");
   const [intakeFile, setIntakeFile] = useState<File | null>(null);
   const [intakeResults, setIntakeResults] = useState<Array<Record<string, any>>>([]);
   const [websiteScans, setWebsiteScans] = useState<WebsiteScanRecord[]>([]);
   const [scanningWebsites, setScanningWebsites] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [scanWaitNote, setScanWaitNote] = useState<string | null>(null);
+  const [scanSavedTotals, setScanSavedTotals] = useState<{ contactsCreated: number; companiesCreated: number } | null>(null);
+  const scanCancelRef = useRef(false);
+  const [savingDiscoveredContacts, setSavingDiscoveredContacts] = useState(false);
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", batchSize: 1, delayMinutes: 5, confirmed: false });
   const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send">("schedule");
   const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
@@ -582,7 +621,7 @@ export default function Home() {
   const latestCompletedBackgroundJob = useMemo(() => backgroundJobs.find((job) => ["completed", "completed_with_issues", "failed"].includes(job.status)), [backgroundJobs]);
   const displayCampaigns = useMemo(() => Array.isArray(control?.campaigns) ? control.campaigns.map((campaign) => ({
     id: String(campaign.id || campaign.name),
-    name: String(campaign.name || "Outreach"),
+    name: String(campaign.name || "IKF Reach"),
     status: paused ? "paused_user_hold" : String(campaign.status || "active"),
     drafts: displayEmails.filter((email) => email.campaign === campaign.name).length,
     senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
@@ -960,54 +999,180 @@ export default function Home() {
     }
   }
 
+  function stopWebsiteDiscovery() {
+    scanCancelRef.current = true;
+  }
+
+  async function fetchScanBatchWithRetry(payload: Record<string, unknown>, attempts = 3) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 75_000);
+      if (attempt > 1) setScanWaitNote(`No response yet — retrying (attempt ${attempt} of ${attempts})…`);
+      else setScanWaitNote(null);
+      try {
+        const response = await fetch("/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "The websites could not be scanned.");
+        setScanWaitNote(null);
+        return result;
+      } catch (error) {
+        clearTimeout(timeoutId);
+        lastError = error;
+        if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("The websites could not be scanned.");
+  }
+
   async function runWebsiteDiscovery() {
     if (!intakeForm.websites.trim()) {
       setNoticeTone("error");
       setNotice("Enter at least one company website to scan.");
       return;
     }
+    const BATCH_SIZE = 30;
+    const resuming = websiteScans.length > 0;
+    scanCancelRef.current = false;
     setScanningWebsites(true);
     setNotice("");
-    try {
-      const response = await fetch("/api/control", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "discover_website_contacts", websites: intakeForm.websites }),
-      });
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || "The websites could not be scanned.");
-      const scans = (result.websites || []) as WebsiteScanRecord[];
-      setWebsiteScans(scans);
+    setScanWaitNote(null);
+    setScanProgress({ completed: websiteScans.length, total: 0 });
+    if (!resuming) setScanSavedTotals(null);
+    const allScans: WebsiteScanRecord[] = resuming ? [...websiteScans] : [];
+    const savedTotals = { contactsCreated: 0, companiesCreated: 0, contactsSkipped: 0, ...(resuming && scanSavedTotals ? scanSavedTotals : {}) };
+    let saveFailedOnce = false;
+
+    function applyFoundEmailsToRawInput() {
       const uniqueFound = new Map<string, string>();
-      for (const scan of scans) {
+      for (const scan of allScans) {
         for (const email of scan.discoveredEmails) {
           const normalizedEmail = email.toLowerCase();
           if (!uniqueFound.has(normalizedEmail)) uniqueFound.set(normalizedEmail, `${email}, ${scan.companyName || ""}, ${scan.website || scan.input}`);
         }
       }
       const foundLines = [...uniqueFound.values()];
-      if (foundLines.length) {
-        setIntakeForm((current) => {
-          const existingEmails = new Set((current.rawInput.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []).map((email) => email.toLowerCase()));
-          const additions = foundLines.filter((line) => {
-            const email = line.split(",")[0].trim().toLowerCase();
-            if (existingEmails.has(email)) return false;
-            existingEmails.add(email);
-            return true;
-          });
-          return { ...current, rawInput: [current.rawInput.trim(), ...additions].filter(Boolean).join("\n") };
+      setIntakeForm((current) => {
+        const existingEmails = new Set((current.rawInput.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []).map((email) => email.toLowerCase()));
+        const additions = foundLines.filter((line) => {
+          const email = line.split(",")[0].trim().toLowerCase();
+          if (existingEmails.has(email)) return false;
+          existingEmails.add(email);
+          return true;
         });
-        setNoticeTone("success");
-        setNotice(`Found ${foundLines.length} public email address${foundLines.length === 1 ? "" : "es"} across ${scans.filter((scan) => scan.ok).length} website${scans.filter((scan) => scan.ok).length === 1 ? "" : "s"}. They were added to the campaign contact list for review.`);
+        if (!additions.length) return current;
+        return { ...current, rawInput: [current.rawInput.trim(), ...additions].filter(Boolean).join("\n") };
+      });
+      return foundLines.length;
+    }
+
+    let networkPaused = false;
+    try {
+      let offset = allScans.length;
+      let total = Infinity;
+      while (offset < total && !scanCancelRef.current) {
+        let result: any;
+        try {
+          result = await fetchScanBatchWithRetry({ action: "discover_website_contacts", websites: intakeForm.websites, offset, limit: BATCH_SIZE });
+        } catch {
+          networkPaused = true;
+          break;
+        }
+        const scans = (result.websites || []) as WebsiteScanRecord[];
+        allScans.push(...scans);
+        total = Number(result.total || 0);
+        offset += scans.length;
+        setWebsiteScans([...allScans]);
+        setScanProgress({ completed: Math.min(offset, total), total });
+        applyFoundEmailsToRawInput();
+
+        const batchWithEmails = scans.filter((scan) => scan.discoveredEmails.length > 0);
+        if (batchWithEmails.length && control?.canManage) {
+          try {
+            const saveResult = await persistDiscoveredContacts(batchWithEmails);
+            savedTotals.contactsCreated += saveResult.contactsCreated;
+            savedTotals.companiesCreated += saveResult.companiesCreated;
+            savedTotals.contactsSkipped += saveResult.contactsSkipped;
+            setScanSavedTotals({ contactsCreated: savedTotals.contactsCreated, companiesCreated: savedTotals.companiesCreated });
+          } catch {
+            saveFailedOnce = true;
+          }
+        }
+
+        if (!result.hasMore || !scans.length) break;
+      }
+
+      const foundCount = applyFoundEmailsToRawInput();
+      const stoppedEarly = scanCancelRef.current;
+      const progressLabel = networkPaused ? `Paused after a network issue at website ${allScans.length}. Found` : stoppedEarly ? "Stopped early. Found" : "Found";
+      const resumeHint = networkPaused ? ` Click "Resume scanning" to continue from where it left off — nothing found so far has been lost.` : "";
+      if (foundCount) {
+        const foundSummary = `${progressLabel} ${foundCount} public email address${foundCount === 1 ? "" : "es"} across ${allScans.filter((scan) => scan.ok).length} website${allScans.filter((scan) => scan.ok).length === 1 ? "" : "s"}.${resumeHint}`;
+        if (control?.canManage) {
+          const saveSummary = savedTotals.contactsCreated || savedTotals.companiesCreated
+            ? ` Saved ${savedTotals.contactsCreated} contact${savedTotals.contactsCreated === 1 ? "" : "s"} to the database under ${savedTotals.companiesCreated} compan${savedTotals.companiesCreated === 1 ? "y" : "ies"} as it went${savedTotals.contactsSkipped ? ` (${savedTotals.contactsSkipped} already existed and were skipped)` : ""}.`
+            : "";
+          setNoticeTone(saveFailedOnce ? "error" : "success");
+          setNotice(`${foundSummary}${saveSummary}${saveFailedOnce ? ` Some batches could not be auto-saved — use "Save found contacts to database" below to catch anything missed.` : ""}`);
+          if (savedTotals.contactsCreated || savedTotals.companiesCreated) await loadControl();
+        } else {
+          setNoticeTone("success");
+          setNotice(foundSummary);
+        }
       } else {
         setNoticeTone("error");
-        setNotice("The websites were scanned, but no public email addresses were found. Review the per-website results below.");
+        setNotice(networkPaused ? `Paused after a network issue before finding any public email addresses.${resumeHint}` : stoppedEarly ? "Scanning was stopped before any public email addresses were found." : "The websites were scanned, but no public email addresses were found. Review the per-website results below.");
       }
     } catch (error) {
       setNoticeTone("error");
       setNotice(error instanceof Error ? error.message : "The websites could not be scanned.");
     } finally {
       setScanningWebsites(false);
+      setScanProgress(null);
+      setScanWaitNote(null);
+    }
+  }
+
+  async function persistDiscoveredContacts(scans: WebsiteScanRecord[]) {
+    const response = await fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "save_discovered_contacts",
+        scans: scans.map((scan) => ({ website: scan.website || scan.input, companyName: scan.companyName, discoveredEmails: scan.discoveredEmails })),
+        industry: intakeForm.industry,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || "The discovered contacts could not be saved.");
+    return result as { contactsCreated: number; companiesCreated: number; contactsSkipped: number };
+  }
+
+  async function saveDiscoveredContacts() {
+    const scans = websiteScans.filter((scan) => scan.discoveredEmails.length > 0);
+    if (!scans.length) {
+      setNoticeTone("error");
+      setNotice("No discovered email addresses to save yet.");
+      return;
+    }
+    setSavingDiscoveredContacts(true);
+    setNotice("");
+    try {
+      const result = await persistDiscoveredContacts(scans);
+      setNoticeTone("success");
+      setNotice(`Saved ${result.contactsCreated} contact${result.contactsCreated === 1 ? "" : "s"} under ${result.companiesCreated} new compan${result.companiesCreated === 1 ? "y" : "ies"}${result.contactsSkipped ? ` (${result.contactsSkipped} already existed and were skipped)` : ""}.`);
+      await loadControl();
+    } catch (error) {
+      setNoticeTone("error");
+      setNotice(error instanceof Error ? error.message : "The discovered contacts could not be saved.");
+    } finally {
+      setSavingDiscoveredContacts(false);
     }
   }
 
@@ -1055,8 +1220,12 @@ export default function Home() {
       }
       setQueueForm((current) => ({ ...current, campaignId: result.campaign.id, confirmed: false }));
       if (intent === "delivery") {
+        setEmailCampaign(result.campaign.name);
         setCampaignWorkspaceView("overview");
+        setSelectedIds(new Set());
+        setBulkMode(null);
         switchSection("campaigns");
+        setCampaignDetailOpen(true);
       }
       await loadControl();
     }
@@ -1144,14 +1313,14 @@ export default function Home() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand-row">
-          <div className="brand-mark"><span>IKF</span><b>Outreach</b></div>
+          <div className="brand-mark"><span>IKF</span><b>Reach</b></div>
           <button className={`mobile-menu-toggle ${mobileMenuOpen ? "open" : ""}`} type="button" aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen} aria-controls="dashboard-navigation" onClick={() => setMobileMenuOpen((open) => !open)}>
             <span /><span /><span />
           </button>
         </div>
         <p className="brand-caption">AI email operations</p>
         <nav id="dashboard-navigation" className={mobileMenuOpen ? "mobile-open" : ""} aria-label="Dashboard sections">
-          <div className="mobile-menu-intro"><strong>IKF Outreach workspace</strong><span>Select a section to continue</span></div>
+          <div className="mobile-menu-intro"><strong>IKF Reach workspace</strong><span>Select a section to continue</span></div>
           {navItems.map((item) => (
             <button key={item.id} className={section === item.id ? "active" : ""} aria-current={section === item.id ? "page" : undefined} onClick={() => switchSection(item.id)}>
               <span aria-hidden="true">{item.icon}</span>{item.label}
@@ -1172,7 +1341,7 @@ export default function Home() {
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">Masterclass outreach</p>
+            <p className="eyebrow">Masterclass IKF Reach</p>
             <h1>{pageTitle}</h1>
           </div>
           <div className="top-actions">
@@ -1187,7 +1356,7 @@ export default function Home() {
 
         <div className="content">
           {!control && (
-            <section className="system-banner loading-banner" role="status"><span className="loading-spinner" /><div><strong>Loading live outreach data</strong><p>Connecting to Supabase and Brevo.</p></div></section>
+            <section className="system-banner loading-banner" role="status"><span className="loading-spinner" /><div><strong>Loading live IKF Reach data</strong><p>Connecting to Supabase and Brevo.</p></div></section>
           )}
           {control && !control.ok && (
             <section className="system-banner error-banner" role="alert"><div><strong>Live data is temporarily unavailable</strong><p>{control.error || "Please try the connection again."}</p></div><button onClick={loadControl}>Retry</button></section>
@@ -1206,7 +1375,7 @@ export default function Home() {
                 <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </section>
 
-              <section className="metric-grid" aria-label="Outreach totals">
+              <section className="metric-grid" aria-label="IKF Reach totals">
                 <Metric label="Generated emails" value={stats.emails} note={`Across ${displayCampaigns.length} campaigns`} tone="violet" />
                 <Metric label="Needs review" value={stats.pendingReview} note="Before approval or scheduling" tone="amber" />
                 <Metric label="All database contacts" value={stats.contacts} note={`${stats.companies} companies across every campaign`} tone="blue" />
@@ -1262,7 +1431,7 @@ export default function Home() {
               <article className="panel campaign-portfolio-hero">
                 <div>
                   <p className="eyebrow">{campaignDetailOpen ? "Campaign workspace" : "Campaign portfolio"}</p>
-                  <h2>{campaignDetailOpen ? selectedCampaignSummary?.name || "Campaign details" : "Every outreach campaign in one place"}</h2>
+                  <h2>{campaignDetailOpen ? selectedCampaignSummary?.name || "Campaign details" : "Every IKF Reach campaign in one place"}</h2>
                   <p>{campaignDetailOpen ? "Review the template, generated emails, live status, and delivery controls for this campaign." : "Choose a campaign to open its emails, template, status, and sending controls."}</p>
                 </div>
                 {campaignDetailOpen ? <button className="quiet-action campaign-back-button" onClick={() => { setCampaignDetailOpen(false); setCampaignWorkspaceView("overview"); setSelectedIds(new Set()); setBulkMode(null); }}>← Back to campaigns</button> : <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>}
@@ -1643,113 +1812,202 @@ export default function Home() {
 
           {section === "create" && (
             <section className="intelligence-layout">
-              <article className="panel intelligence-studio">
-                <div className="studio-hero">
-                  <div><p className="eyebrow">Research · enrich · personalize</p><h2>Outreach Intelligence Studio</h2><p>Bring whatever you have. The studio extracts contacts, researches company websites, discovers public email addresses, and creates review-ready drafts.</p></div>
-                  <nav className="studio-steps" aria-label="Campaign creation steps"><a href="#campaign-setup">1 · Campaign</a><a href="#campaign-audience">2 · Audience</a><a href="#campaign-launch">3 · Review & create</a></nav>
-                </div>
-                <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
-                  <div className="campaign-setup-grid" id="campaign-setup">
-                    <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders · August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
-                    <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {ASSOCIATION NAME} - AI Native Thinking Masterclass" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
-                  </div>
-                  <section className="template-field">
-                    <div className="template-field-heading">
-                      <span>Your email template</span>
-                      <small>Rich campaign template · Version {intakeForm.emailTemplateVersion}</small>
-                    </div>
-                    <RichEmailEditor
-                      value={intakeForm.emailTemplate}
-                      disabled={working}
-                      onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))}
-                    />
-                    <small>Use the <strong>Personalize</strong> menu to insert contact, company, research, topic, industry, website, or focus-area fields. Formatting around each field is preserved in every generated email. Missing values and curly brackets are removed safely before review or delivery.</small>
-                  </section>
-                  <div className="studio-section-heading" id="campaign-audience"><span>2</span><div><strong>Add your audience</strong><small>Paste contacts, scan websites, or upload a document. New addresses are validated before drafts are created.</small></div></div>
-                  <div className="source-grid">
-                    <label className="source-card">
-                      <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
-                      <textarea rows={8} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
-                    </label>
-                    <div className="source-card website-source-card">
-                      <span className="source-icon">www</span><strong>Add company websites</strong><small>Enter up to 50 websites. They are queued and researched in parallel batches, even after this tab is closed.</small>
-                      <textarea id="website-sources" aria-label="Company websites" rows={8} value={intakeForm.websites} onChange={(event) => { setIntakeForm({ ...intakeForm, websites: event.target.value }); setWebsiteScans([]); }} placeholder={"www.company.com\nhttps://association.org/contact-us/\nexample.in"} />
-                      <button type="button" className="website-scan-button" disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>{scanningWebsites ? "Scanning websites…" : "Find public email addresses"}</button>
-                    </div>
-                    <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
-                      <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB. Every valid contact is queued in safe background batches.</small>
-                      <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
-                      <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
-                    </label>
-                  </div>
-                  <label className="brief-field industry-domain-field">
-                    <span>Industry / business domain</span>
-                    <input list="industry-domain-options" value={intakeForm.industry} onChange={(event) => setIntakeForm({ ...intakeForm, industry: event.target.value })} placeholder="Auto-detect from each company website, or choose/type a default" />
-                    <small>Optional batch default. Leave blank to classify every company independently from its website and research.</small>
-                  </label>
-                  {websiteScans.length > 0 && (
-                    <section className="website-scan-results" aria-live="polite">
-                      <div><span><strong>Website scan results</strong><small>{websiteScans.length} website{websiteScans.length === 1 ? "" : "s"} checked independently</small></span><button type="button" onClick={() => setWebsiteScans([])}>Clear results</button></div>
-                      <div className="website-scan-grid">
-                        {websiteScans.map((scan) => (
-                          <article className={scan.ok ? "website-scan-card" : "website-scan-card failed"} key={scan.input}>
-                            <span className="scan-state">{scan.ok ? "✓" : "!"}</span>
-                            <div>
-                              <strong>{scan.companyName || scan.input}</strong>
-                              <small>{scan.ok ? `${scan.pagesReviewed.length} public page${scan.pagesReviewed.length === 1 ? "" : "s"} scanned` : scan.error}</small>
-                              {scan.discoveredEmails.length ? <div className="email-chip-list">{scan.discoveredEmails.map((email) => <span key={email}>{email}</span>)}</div> : scan.ok && <p>No public email address found on the scanned pages.</p>}
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    </section>
-                  )}
-                  <label className="brief-field"><span>Optional context or instructions</span><textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." /></label>
-                  <div className="studio-section-heading" id="campaign-launch"><span>3</span><div><strong>Review campaign settings</strong><small>Confirm the sender, Reply-To inbox, and what should happen next.</small></div></div>
-                  <section className="campaign-creation-actions">
-                    <div className="campaign-identity-fields">
-                      <label className="campaign-sender-field">
-                        <span>Verified Brevo sender</span>
-                        <select value={intakeForm.senderEmail} onChange={(event) => {
-                          const senderEmail = event.target.value;
-                          setIntakeForm((current) => ({ ...current, senderEmail, ...(replyToChoice === "sender" ? { replyToEmail: senderEmail } : {}) }));
-                        }}>
-                          {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
-                        </select>
-                        <small>Used as the visible From address and email signature.</small>
-                      </label>
-                      <label className="campaign-sender-field campaign-reply-field">
-                        <span>Reply-To email</span>
-                        <select value={replyToChoice} onChange={(event) => {
-                          const choice = event.target.value;
-                          setReplyToChoice(choice);
-                          if (choice === "sender") setIntakeForm((current) => ({ ...current, replyToEmail: current.senderEmail }));
-                          else if (choice !== "custom") setIntakeForm((current) => ({ ...current, replyToEmail: choice }));
-                        }}>
-                          <option value="sender">Same as selected sender</option>
-                          {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={`reply-${item.email}`} value={item.email}>{item.email}</option>)}
-                          <option value="custom">Enter another email</option>
-                        </select>
-                        {replyToChoice === "custom" && <input type="email" required value={intakeForm.replyToEmail} onChange={(event) => setIntakeForm({ ...intakeForm, replyToEmail: event.target.value })} placeholder="replies@yourcompany.com" autoComplete="email" aria-label="Custom Reply-To email" />}
-                        <small>Replies from recipients will be delivered to {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "the valid inbox you enter"}.</small>
-                      </label>
-                    </div>
-                    <div className="campaign-paths">
-                      <div><strong>Choose what happens next</strong><span>Research runs in the background. Sending always remains behind review, approval, and confirmation.</span></div>
-                      <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
-                      <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !intakeForm.campaignName.trim() || !intakeForm.topic.trim() || !intakeForm.emailTemplate.trim() || (!intakeForm.rawInput.trim() && !intakeForm.websites.trim() && !intakeFile)}>Continue to campaign setup</button>
-                    </div>
-                  </section>
-                </form>
-              </article>
+              {(() => {
+                const isStep1Valid = !!(intakeForm.campaignName.trim() && intakeForm.topic.trim() && intakeForm.emailTemplate.trim());
+                const isStep2Valid = !!(intakeForm.rawInput.trim() || intakeForm.websites.trim() || intakeFile);
+                const parsedEmails = (intakeForm.rawInput.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/gi) || []).length;
+                const rawInputWithoutEmails = intakeForm.rawInput.replace(/[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+/gi, " ");
+                const parsedWebsites = (rawInputWithoutEmails.match(/(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9._-]+\.(com|org|net|io|in|co))/gi) || []).length;
+                const scannedOkCount = websiteScans.filter((scan) => scan.ok).length;
+                const scannedEmailCount = websiteScans.reduce((sum, scan) => sum + scan.discoveredEmails.length, 0);
+                const scannedSkippedCount = websiteScans.filter((scan) => scan.skipped).length;
 
-              <aside className="studio-sidebar">
-                <article className="panel intelligence-card">
-                  <p className="eyebrow">How the intelligence works</p><h2>Smart, but reviewable</h2>
-                  <ol className="intelligence-list"><li><b>Extract</b><span>Find emails, names, websites, and company clues in pasted text or documents.</span></li><li><b>Enrich</b><span>Derive the organization from the domain and inspect its public web presence.</span></li><li><b>Personalize</b><span>Connect the company’s focus with your outreach topic and relevant use cases.</span></li><li><b>Address correctly</b><span>Use a clear personal name when confidently available; otherwise Dear Sir/Madam.</span></li><li><b>Save safely</b><span>Update companies and contacts, prevent duplicates, and create drafts for manual review.</span></li></ol>
-                </article>
-                <article className="panel guardrail-card"><span className="guardrail-dot" /><div><strong>Sending remains protected</strong><p>Reply-To is {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "waiting for a valid email"}. Approval is still mandatory.</p></div></article>
-              </aside>
+                return (
+                  <article className="intelligence-studio-container">
+                    <div className="studio-hero-modern">
+                      <nav className="wizard-track" aria-label="Campaign creation steps">
+                        <div className="wizard-track-rail"><div className="wizard-track-fill" style={{ width: `${((currentStep - 1) / 2) * 100}%` }} /></div>
+                        <button type="button" className={`track-step ${currentStep === 1 ? 'is-active' : ''} ${isStep1Valid && currentStep !== 1 ? 'is-done' : ''}`} onClick={() => setCurrentStep(1)}>
+                          <span className="track-index">{isStep1Valid && currentStep !== 1 ? '✓' : '01'}</span>
+                          <span className="track-copy"><strong>Setup</strong><small>Name &amp; template</small></span>
+                        </button>
+                        <span className={`track-arrow ${isStep1Valid ? 'is-filled' : ''}`} aria-hidden="true">›</span>
+                        <button type="button" disabled={!isStep1Valid} className={`track-step ${currentStep === 2 ? 'is-active' : ''} ${isStep2Valid && currentStep !== 2 ? 'is-done' : ''}`} onClick={() => setCurrentStep(2)}>
+                          <span className="track-index">{isStep2Valid && currentStep !== 2 ? '✓' : '02'}</span>
+                          <span className="track-copy"><strong>Audience</strong><small>Contacts &amp; context</small></span>
+                        </button>
+                        <span className={`track-arrow ${isStep2Valid ? 'is-filled' : ''}`} aria-hidden="true">›</span>
+                        <button type="button" disabled={!isStep1Valid || !isStep2Valid} className={`track-step ${currentStep === 3 ? 'is-active' : ''}`} onClick={() => setCurrentStep(3)}>
+                          <span className="track-index">03</span>
+                          <span className="track-copy"><strong>Generate</strong><small>Review &amp; send</small></span>
+                        </button>
+                      </nav>
+                    </div>
+                    <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
+                      {currentStep === 1 && (
+                        <div className="modern-step-card">
+                          <div className="wizard-header"><span className="wizard-badge">1</span><h3 className="wizard-title">Campaign Setup</h3></div>
+                          <div className="campaign-setup-grid" id="campaign-setup">
+                            <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders - August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
+                            <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {{company}} - Product Launch 2026" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
+                          </div>
+                          <section className="template-field" style={{ marginTop: 24 }}>
+                            <div className="template-field-heading">
+                              <span>Your email template</span>
+                              <small>Rich campaign template · Version {intakeForm.emailTemplateVersion}</small>
+                            </div>
+                            <RichEmailEditor
+                              value={intakeForm.emailTemplate}
+                              disabled={working}
+                              onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))}
+                            />
+                            <small>Use the <strong>Personalize</strong> menu to insert contact, company, research, topic, industry, website, or focus-area fields. Formatting around each field is preserved in every generated email. Missing values and curly brackets are removed safely before review or delivery.</small>
+                          </section>
+                          <div className="wizard-nav">
+                            <div />
+                            <button type="button" className="btn-next" disabled={!isStep1Valid} onClick={() => setCurrentStep(2)}>Next: Add Audience →</button>
+                          </div>
+                        </div>
+                      )}
+
+                      {currentStep === 2 && (
+                        <div className="modern-step-card">
+                          <div className="wizard-header"><span className="wizard-badge">2</span><h3 className="wizard-title">Add Your Audience</h3></div>
+                          
+                          <div className="audience-setup-section">
+                            <h4 className="section-subheading">Data Sources</h4>
+                            <div className="source-grid">
+                              <label className="source-card">
+                                <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
+                                <textarea rows={6} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
+                                {(parsedEmails > 0 || parsedWebsites > 0) && (
+                                  <div className="extraction-badge">✨ Found {parsedEmails} email{parsedEmails !== 1 ? 's' : ''} and {parsedWebsites} website{parsedWebsites !== 1 ? 's' : ''}</div>
+                                )}
+                              </label>
+                              <div className="source-card website-source-card">
+                                <span className="source-icon">www</span><strong>Add company websites</strong><small>Add as many websites as you need.</small>
+                                <textarea id="website-sources" aria-label="Company websites" rows={6} value={intakeForm.websites} onChange={(event) => { setIntakeForm({ ...intakeForm, websites: event.target.value }); setWebsiteScans([]); }} placeholder={"www.company.com\nhttps://association.org/contact-us/\nexample.in"} />
+                                {savingDiscoveredContacts && !scanningWebsites ? (
+                                  <div className="scan-progress" role="status" aria-live="polite">
+                                    <div className="scan-progress-row"><span>Saving found contacts to the database…</span></div>
+                                    <i><b className="scan-progress-indeterminate" /></i>
+                                  </div>
+                                ) : scanningWebsites && scanProgress ? (
+                                  <div className="scan-progress" role="status" aria-live="polite">
+                                    <div className="scan-progress-row">
+                                      <span>Scanning websites… {scanProgress.completed} of {scanProgress.total || "?"}</span>
+                                      {!(scanProgress.total > 0 && scanProgress.completed >= scanProgress.total) && (
+                                        <button type="button" className="scan-stop-button" onClick={stopWebsiteDiscovery}>Stop</button>
+                                      )}
+                                    </div>
+                                    <i><b style={{ width: `${scanProgress.total ? Math.min(100, Math.round((scanProgress.completed / scanProgress.total) * 100)) : 0}%` }} /></i>
+                                    {scanWaitNote && <small className="scan-progress-note scan-progress-warn">{scanWaitNote}</small>}
+                                    {scanSavedTotals && (scanSavedTotals.contactsCreated > 0 || scanSavedTotals.companiesCreated > 0) && (
+                                      <small className="scan-progress-note">✓ {scanSavedTotals.contactsCreated} contact{scanSavedTotals.contactsCreated === 1 ? "" : "s"} already saved to the database as it goes</small>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <button type="button" className="website-scan-button" disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>{websiteScans.length > 0 ? "Resume scanning" : "Find public email addresses"}</button>
+                                )}
+                              </div>
+                              <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
+                                <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB.</small>
+                                <div className="upload-dropzone">
+                                  <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
+                                  <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
+                                </div>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div className="audience-setup-section" style={{ marginTop: 32 }}>
+                            <div className="context-header">
+                              <h4 className="section-subheading" style={{ textTransform: 'uppercase', fontSize: '13px', letterSpacing: '0.5px' }}>Context & AI Instructions</h4>
+                            </div>
+                            <div className="context-grid">
+                              <label className="brief-field">
+                                <span>Industry / business domain <small>(Leave blank to auto-detect)</small></span>
+                                <input list="industry-domain-options" value={intakeForm.industry} onChange={(event) => setIntakeForm({ ...intakeForm, industry: event.target.value })} placeholder="E.g. Healthcare, Fintech, Manufacturing" />
+                              </label>
+                              <label className="brief-field">
+                                <span>Optional context or instructions</span>
+                                <textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." />
+                              </label>
+                            </div>
+                          </div>
+                          {websiteScans.length > 0 && (
+                            <section className="website-scan-results" aria-live="polite" style={{ marginTop: 24 }}>
+                              <div><span><strong>Website scan results</strong><small>{websiteScans.length} checked · {scannedOkCount} responded · {scannedEmailCount} email{scannedEmailCount === 1 ? "" : "s"} found{scannedSkippedCount ? ` · ${scannedSkippedCount} already in database (skipped)` : ""}</small></span><span className="website-scan-actions"><button type="button" className="website-scan-button" disabled={savingDiscoveredContacts || working || !control?.canManage || !websiteScans.some((scan) => scan.discoveredEmails.length > 0)} onClick={saveDiscoveredContacts} title="Save the discovered companies and email addresses to the database now, without creating a campaign">{savingDiscoveredContacts ? "Saving…" : "Save found contacts to database"}</button><button type="button" onClick={() => setWebsiteScans([])}>Clear results</button></span></div>
+                              <div className="website-scan-grid">
+                                {websiteScans.map((scan) => (
+                                  <article className={scan.skipped ? "website-scan-card skipped" : scan.ok ? "website-scan-card" : "website-scan-card failed"} key={scan.input}>
+                                    <span className="scan-state">{scan.skipped ? "↷" : scan.ok ? "✓" : "!"}</span>
+                                    <div>
+                                      <strong>{scan.companyName || scan.input}</strong>
+                                      <small>{scan.skipped ? "Already in the database — scan skipped" : scan.ok ? `${scan.pagesReviewed.length} public page${scan.pagesReviewed.length === 1 ? "" : "s"} scanned` : scan.error}</small>
+                                      {scan.discoveredEmails.length ? <div className="email-chip-list">{scan.discoveredEmails.map((email) => <span key={email}>{email}</span>)}</div> : (scan.ok && !scan.skipped) && <p>No public email address found on the scanned pages.</p>}
+                                    </div>
+                                  </article>
+                                ))}
+                              </div>
+                            </section>
+                          )}
+                          <div className="wizard-nav">
+                            <button type="button" className="btn-back" onClick={() => setCurrentStep(1)}>← Back</button>
+                            <button type="button" className="btn-next" disabled={!isStep2Valid} onClick={() => setCurrentStep(3)}>Next: Review & Create →</button>
+                          </div>
+                        </div>
+                      )}
+
+                      {currentStep === 3 && (
+                        <div className="modern-step-card">
+                          <div className="wizard-header"><span className="wizard-badge">3</span><h3 className="wizard-title">Review Campaign Settings</h3></div>
+                          <section className="campaign-creation-actions" style={{ borderTop: 'none', paddingTop: 0 }}>
+                            <div className="campaign-identity-fields">
+                              <label className="campaign-sender-field">
+                                <span>Verified Brevo sender</span>
+                                <select value={intakeForm.senderEmail} onChange={(event) => {
+                                  const senderEmail = event.target.value;
+                                  setIntakeForm((current) => ({ ...current, senderEmail, ...(replyToChoice === "sender" ? { replyToEmail: senderEmail } : {}) }));
+                                }}>
+                                  {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
+                                </select>
+                                <small>Used as the visible From address and email signature.</small>
+                              </label>
+                              <label className="campaign-sender-field campaign-reply-field">
+                                <span>Reply-To email</span>
+                                <select value={replyToChoice} onChange={(event) => {
+                                  const choice = event.target.value;
+                                  setReplyToChoice(choice);
+                                  if (choice === "sender") setIntakeForm((current) => ({ ...current, replyToEmail: current.senderEmail }));
+                                  else if (choice !== "custom") setIntakeForm((current) => ({ ...current, replyToEmail: choice }));
+                                }}>
+                                  <option value="sender">Same as selected sender</option>
+                                  {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={`reply-${item.email}`} value={item.email}>{item.email}</option>)}
+                                  <option value="custom">Enter another email</option>
+                                </select>
+                                {replyToChoice === "custom" && <input type="email" required value={intakeForm.replyToEmail} onChange={(event) => setIntakeForm({ ...intakeForm, replyToEmail: event.target.value })} placeholder="replies@yourcompany.com" autoComplete="email" aria-label="Custom Reply-To email" />}
+                                <small>Replies from recipients will be delivered to {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "the valid inbox you enter"}.</small>
+                              </label>
+                            </div>
+                            <div className="campaign-paths">
+                              <div><strong>Choose what happens next</strong><span>Research runs in the background. Sending always remains behind review, approval, and confirmation.</span></div>
+                              <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !isStep1Valid || !isStep2Valid}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
+                              <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !isStep1Valid || !isStep2Valid}>Continue to campaign setup</button>
+                            </div>
+                          </section>
+                          <div className="wizard-nav">
+                            <button type="button" className="btn-back" onClick={() => setCurrentStep(2)}>← Back</button>
+                            <div />
+                          </div>
+                        </div>
+                      )}
+                    </form>
+                  </article>
+                );
+              })()}
+
+
 
               {intakeResults.length > 0 && (
                 <section className="panel research-results">
@@ -1819,7 +2077,7 @@ export default function Home() {
           {section === "settings" && (
             <section className="settings-console">
               <article className={`panel settings-hero ${paused ? "is-paused" : "is-active"}`}>
-                <div><p className="eyebrow">Outreach operations</p><h2>Sending is {paused ? "paused and protected" : "active within your limits"}</h2><p>{paused ? "Drafting, research, contact editing, and review remain available. Scheduling and client sending are blocked." : "Only approved emails can be scheduled or sent, inside the delivery limits below."}</p></div>
+                <div><p className="eyebrow">IKF Reach operations</p><h2>Sending is {paused ? "paused and protected" : "active within your limits"}</h2><p>{paused ? "Drafting, research, contact editing, and review remain available. Scheduling and client sending are blocked." : "Only approved emails can be scheduled or sent, inside the delivery limits below."}</p></div>
                 <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </article>
 

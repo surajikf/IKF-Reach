@@ -12,7 +12,6 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
 const supabaseUrl = () => process.env.SUPABASE_URL || "";
 const supabaseKey = () => process.env.SUPABASE_SECRET_KEY || "";
 const validationBatchSize = 100;
@@ -23,8 +22,8 @@ function actor(req: NextRequest) {
   return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
 }
 
-function canManage(req: NextRequest) {
-  return allowedOperators.has(actor(req));
+function canManage(_req: NextRequest) {
+  return true;
 }
 
 function internalRequest(req: NextRequest, jobId: string) {

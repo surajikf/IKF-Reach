@@ -18,7 +18,7 @@ test("campaign creation exposes durable background research and verified sender 
   assert.match(page, /Save as draft campaign/);
   assert.match(page, /Continue to campaign setup/);
   assert.match(page, /Verified Brevo sender/);
-  assert.match(page, /Enter up to 50 websites/);
+  assert.match(page, /Add as many websites as you need/);
   assert.match(page, /background-campaign/);
 });
 
@@ -32,7 +32,7 @@ test("server queues campaign sources and processes them in bounded batches", () 
   assert.match(api, /!research && inferredWebsite && !input\.skipDomainResearch/);
   assert.match(api, /AS retrying/);
   assert.match(api, /LIMIT \?/);
-  assert.match(api, /suppliedWebsites\.length > 50/);
+  assert.doesNotMatch(api, /suppliedWebsites\.length > 50/);
   assert.doesNotMatch(api, /parsedContacts\.length > 50/);
   assert.doesNotMatch(api, /\.slice\(0, 120_000\)/);
   assert.match(api, /offset \+= 75/);
@@ -40,7 +40,7 @@ test("server queues campaign sources and processes them in bounded batches", () 
 });
 
 test("contact documents queue every valid record and retain PDF organization context", () => {
-  assert.match(page, /Every valid contact is queued in safe background batches/);
+  assert.match(page, /Upload a contact document/);
   assert.match(api, /parseDocumentContactInput\(documentText\)/);
   assert.match(api, /mergeContactInputs/);
 });
@@ -77,8 +77,7 @@ test("generated drafts enforce the requested selective email formatting", () => 
   assert.match(api, /emphasizeImportantKeywords/);
   assert.match(api, /<strong>\$1:<\/strong>/);
   assert.match(api, /normalizeAiStyle/);
-  assert.match(api, /placeCommunityBeforeSignature/);
-  assert.match(api, /signatureIndex/);
+  assert.doesNotMatch(api, /placeCommunityBeforeSignature/);
   assert.match(api, /formatting_version: 4/);
   assert.match(api, /safe\.split\(`IKFPERSONALIZATIONTOKEN/);
   assert.match(api, /refreshBackgroundCampaignDraftFormatting/);

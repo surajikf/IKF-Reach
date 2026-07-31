@@ -28,7 +28,7 @@ type StatisticsPayload = {
   provider?: { connected: boolean; warning?: string | null; lastSyncedAt: string };
   campaigns?: AnalyticsCampaign[];
   events?: AnalyticsEvent[];
-  coverage?: { liveBrevoEvents: number; storedWebhookEvents: number; matchedOutreachEvents: number };
+  coverage?: { liveBrevoEvents: number; storedWebhookEvents: number; matchedReachEvents: number };
   error?: string;
 };
 type ReportTab = "overview" | "deliverability" | "opens" | "clicks" | "recipients" | "domains" | "insights";
@@ -205,10 +205,10 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     const scheduled = campaignEvents.filter((event) => event.event === "scheduled").map((event) => event.date).sort()[0];
     const sent = campaignEvents.filter((event) => event.event === "sent").map((event) => event.date).sort()[0];
     return {
-      name: campaign?.name || "All outreach campaigns",
+      name: campaign?.name || "All IKF Reach campaigns",
       subject: campaignId === "all" ? `${subjects.length} subject lines` : subjects[0] || "No sent subject available",
       sender: campaign ? `${campaign.senderName || "Sender"} <${campaign.senderEmail || "—"}>` : `${senders.length} senders`,
-      type: "Transactional outreach",
+      type: "Transactional IKF Reach",
       created: campaign?.createdAt || "",
       scheduled: scheduled || "",
       sent: sent || "",
@@ -308,7 +308,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `ikf-outreach-statistics-${dateInput(range.start)}-${dateInput(range.end)}.csv`;
+    anchor.download = `ikf-reach-statistics-${dateInput(range.start)}-${dateInput(range.end)}.csv`;
     anchor.click();
     URL.revokeObjectURL(url);
   }
@@ -322,7 +322,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     const url = URL.createObjectURL(new Blob(["\uFEFF", tsv], { type: "application/vnd.ms-excel;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `ikf-outreach-statistics-${dateInput(range.start)}-${dateInput(range.end)}.xls`;
+    anchor.download = `ikf-reach-statistics-${dateInput(range.start)}-${dateInput(range.end)}.xls`;
     anchor.click();
     URL.revokeObjectURL(url);
   }
@@ -332,7 +332,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
   return (
     <div className="statistics-module">
       <section className="statistics-hero">
-        <div><p className="eyebrow">Brevo campaign intelligence</p><h2>Campaign Statistics</h2><p>Delivery, engagement, recipient, domain, and event-level reporting for every IKF outreach campaign.</p></div>
+        <div><p className="eyebrow">Brevo campaign intelligence</p><h2>Campaign Statistics</h2><p>Delivery, engagement, recipient, domain, and event-level reporting for every IKF Reach campaign.</p></div>
         <div className="statistics-hero-actions"><button onClick={loadStatistics} disabled={loading}>{loading ? "Refreshing…" : "Refresh Brevo data"}</button><button onClick={exportCsv} disabled={!filtered.length}>Export CSV</button><button onClick={exportExcel} disabled={!filtered.length}>Export Excel</button><button onClick={() => window.print()}>Save PDF</button></div>
       </section>
 
@@ -344,7 +344,7 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
         {preset === "custom" && <><label><span>From</span><input type="date" value={customStart} max={customEnd} onChange={(event) => setCustomStart(event.target.value)} /></label><label><span>To</span><input type="date" value={customEnd} min={customStart} max={dateInput(new Date())} onChange={(event) => setCustomEnd(event.target.value)} /></label></>}
         <label><span>Campaign</span><select value={campaignId} onChange={(event) => setCampaignId(event.target.value)}><option value="all">All campaigns</option>{(data?.campaigns || []).map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}</select></label>
         <label><span>Sender</span><select value={sender} onChange={(event) => setSender(event.target.value)}><option value="all">All senders</option>{senders.map((email) => <option key={email} value={email}>{email}</option>)}</select></label>
-        <label><span>Campaign type</span><select value={campaignType} onChange={(event) => setCampaignType(event.target.value)}><option value="all">All campaign types</option><option value="transactional">Transactional outreach</option></select></label>
+        <label><span>Campaign type</span><select value={campaignType} onChange={(event) => setCampaignType(event.target.value)}><option value="all">All campaign types</option><option value="transactional">Transactional IKF Reach</option></select></label>
         <label><span>Status</span><select value={campaignStatus} onChange={(event) => setCampaignStatus(event.target.value)}><option value="all">All statuses</option>{statuses.map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}</select></label>
         <label><span>Tag</span><select value={tag} onChange={(event) => setTag(event.target.value)}><option value="all">All tags</option>{tags.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
         <label><span>Event</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}><option value="all">All events</option>{Object.entries(eventNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>

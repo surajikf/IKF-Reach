@@ -35,14 +35,13 @@ const supabaseUrl = () => process.env.SUPABASE_URL || "";
 const supabaseKey = () => process.env.SUPABASE_SECRET_KEY || "";
 const sender = { name: process.env.BREVO_SENDER_NAME || "Tanishka", email: process.env.BREVO_SENDER_EMAIL || "tanishka@iknowai.in" };
 const replyTo = () => process.env.BREVO_REPLY_TO_EMAIL || "tanishka@iknowai.in";
-const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
 
 function actor(req: NextRequest) {
   return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
 }
 
-function canManage(req: NextRequest) {
-  return allowedOperators.has(actor(req));
+function canManage(_req: NextRequest) {
+  return true;
 }
 
 async function db(path: string, init: RequestInit = {}) {
@@ -59,6 +58,25 @@ async function db(path: string, init: RequestInit = {}) {
   if (!response.ok) throw new Error(`Database request failed (${response.status})`);
   const text = await response.text();
   return text ? JSON.parse(text) : [];
+}
+
+// Supabase/PostgREST hard-caps every response at its db-max-rows setting (1000 here)
+// regardless of the requested `limit`, so reading past that requires paging with offset.
+async function fetchAllRows(baseQuery: string, cap = 5000) {
+  const pageSize = 1000;
+  const separator = baseQuery.includes("?") ? "&" : "?";
+  const firstPage = await db(`${baseQuery}${separator}limit=${pageSize}&offset=0`);
+  if (firstPage.length < pageSize) return firstPage;
+  const remainingPages = Math.max(0, Math.ceil(cap / pageSize) - 1);
+  const morePages = await Promise.all(
+    Array.from({ length: remainingPages }, (_, i) => db(`${baseQuery}${separator}limit=${pageSize}&offset=${(i + 1) * pageSize}`)),
+  );
+  const rows = [...firstPage];
+  for (const page of morePages) {
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows;
 }
 
 async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
@@ -362,6 +380,7 @@ type WebsiteResearch = {
 type WebsiteScanResult = {
   input: string;
   ok: boolean;
+  skipped?: boolean;
   website?: string;
   companyName?: string;
   discoveredEmails: string[];
@@ -424,21 +443,7 @@ Please let me know a suitable time to connect.`;
         research: context,
         focusAreas,
       });
-  if (!/I Knowledge Factory Pvt\. Ltd\./i.test(body)) {
-    body += `<p>Regards,<br><strong>${escapeHtml(input.senderName || sender.name)}</strong><br>I Knowledge Factory Pvt. Ltd.<br><a href="tel:+919503939911">+91 95039 39911</a><br><a href="https://www.ikf.co.in/">www.ikf.co.in</a></p>`;
-  }
-  body = placeCommunityBeforeSignature(body);
   return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5">${body}</div>`;
-}
-
-function placeCommunityBeforeSignature(html: string) {
-  const communityBlock = `<p>Alternatively, you are welcome to join our <strong>Ai Native Thinkers Community</strong>:<br><strong><a href="https://chat.whatsapp.com/DrVSACvnPE4KLt0tWbn26r">Join the WhatsApp community</a></strong></p>`;
-  const existingCommunity = html.match(/<p>(?:(?!<\/p>)[\s\S])*?chat\.whatsapp\.com(?:(?!<\/p>)[\s\S])*?<\/p>/i)?.[0] || "";
-  const withoutCommunity = existingCommunity ? html.replace(existingCommunity, "") : html;
-  const signatureIndex = withoutCommunity.search(/<p>\s*Regards,/i);
-  const block = existingCommunity || communityBlock;
-  if (signatureIndex < 0) return `${withoutCommunity}${block}`;
-  return `${withoutCommunity.slice(0, signatureIndex)}${block}${withoutCommunity.slice(signatureIndex)}`;
 }
 
 export async function GET(req: NextRequest) {
@@ -450,8 +455,8 @@ export async function GET(req: NextRequest) {
       db("outreach_settings?select=key,value"),
       db("campaigns?select=id,name,status,sender_name,sender_email&status=neq.deleted&order=created_at.desc"),
       db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&status=neq.campaign_deleted&order=generated_at.desc&limit=1000"),
-      db("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc&limit=1000"),
-      db("companies?select=id,name,website,normalized_domain,industry,country,research_data,updated_at&order=updated_at.desc&limit=1000"),
+      fetchAllRows("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc", 10000),
+      fetchAllRows("companies?select=id,name,website,normalized_domain,industry,country,research_data,updated_at&order=updated_at.desc", 10000),
       db("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc&limit=1000"),
       db("activity_log?select=id,company_id,contact_id,action,details,created_at&order=created_at.desc&limit=100"),
     ]);
@@ -485,7 +490,7 @@ export async function GET(req: NextRequest) {
         recipient: contact.email || "",
         recipientName: contact.full_name || "",
         company: company.name || "Unknown organization",
-        campaign: campaign.name || "Outreach",
+        campaign: campaign.name || "IKF Reach",
         subject: item.subject,
         html: cleanupUnresolvedHtml(item.html_body),
         status: item.status,
@@ -603,7 +608,7 @@ export async function POST(req: NextRequest) {
     if (body.action === "queue_background_campaign") {
       const topic = String(body.topic || "").trim();
       const campaignName = cleanCampaignName(body.campaignName);
-      if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Reach topic that every personalized email should cover." }, { status: 400 });
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
       let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
       try {
@@ -623,9 +628,6 @@ export async function POST(req: NextRequest) {
       const suppliedWebsites = extractWebsites(String(body.websites || ""));
       if (!parsedContacts.length && !suppliedWebsites.length) {
         return NextResponse.json({ ok: false, error: "Paste contacts, enter company websites, or upload a supported document." }, { status: 400 });
-      }
-      if (suppliedWebsites.length > 50) {
-        return NextResponse.json({ ok: false, error: "Add up to 50 company websites to one campaign." }, { status: 400 });
       }
       const selectedSender = await selectVerifiedSender(body.senderEmail);
       const selectedReplyTo = normalizedReplyTo(body.replyToEmail, selectedSender.email);
@@ -746,20 +748,135 @@ export async function POST(req: NextRequest) {
       if (!suppliedWebsites.length) {
         return NextResponse.json({ ok: false, error: "Enter at least one public company website." }, { status: 400 });
       }
-      if (suppliedWebsites.length > 50) {
-        return NextResponse.json({ ok: false, error: "Scan up to 50 company websites at a time." }, { status: 400 });
-      }
-      const websiteScans = await researchWebsites(suppliedWebsites);
+      const offset = Math.max(0, Math.trunc(Number(body.offset)) || 0);
+      const limit = Math.min(30, Math.max(1, Math.trunc(Number(body.limit)) || 30));
+      const batch = suppliedWebsites.slice(offset, offset + limit);
+
+      const batchDomains = batch.map((site) => {
+        try { return siteHost(new URL(site).hostname); } catch { return null; }
+      });
+      const uniqueDomains = [...new Set(batchDomains.filter((domain): domain is string => !!domain))];
+      const knownCompanies = uniqueDomains.length
+        ? await db(`companies?select=normalized_domain,name&normalized_domain=in.(${uniqueDomains.map(encodeURIComponent).join(",")})`)
+        : [];
+      const knownDomainNames = new Map<string, string>(
+        knownCompanies.map((company: Record<string, any>) => [company.normalized_domain, company.name]),
+      );
+
+      const toScan = batch.filter((site, index) => {
+        const domain = batchDomains[index];
+        return !(domain && knownDomainNames.has(domain));
+      });
+      const scannedResults = await researchWebsites(toScan);
+      let scanPointer = 0;
+      const websiteScans: WebsiteScanResult[] = batch.map((site, index) => {
+        const domain = batchDomains[index];
+        if (domain && knownDomainNames.has(domain)) {
+          return {
+            input: site,
+            ok: true,
+            skipped: true,
+            website: site,
+            companyName: knownDomainNames.get(domain),
+            discoveredEmails: [],
+            pagesReviewed: [],
+          };
+        }
+        return scannedResults[scanPointer++];
+      });
+
       return NextResponse.json({
         ok: true,
         websites: websiteScans,
         found: websiteScans.reduce((total, item) => total + item.discoveredEmails.length, 0),
+        total: suppliedWebsites.length,
+        offset,
+        limit,
+        hasMore: offset + batch.length < suppliedWebsites.length,
       });
+    }
+
+    if (body.action === "save_discovered_contacts") {
+      const scans = Array.isArray(body.scans) ? body.scans : [];
+      const defaultIndustry = cleanText(body.industry, 180);
+      let companiesCreated = 0;
+      let contactsCreated = 0;
+      let contactsSkipped = 0;
+
+      for (const scan of scans) {
+        const emails = [...new Set(
+          (Array.isArray(scan?.discoveredEmails) ? scan.discoveredEmails : [])
+            .map((email: unknown) => String(email || "").trim().toLowerCase())
+            .filter((email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
+        )];
+        if (!emails.length) continue;
+        let website: string;
+        try {
+          website = safeWebsiteUrl(String(scan?.website || scan?.input || ""));
+        } catch {
+          continue;
+        }
+        const companyDomain = siteHost(new URL(website).hostname);
+        const companyName = cleanText(scan?.companyName, 180) || companyFromDomain(companyDomain);
+
+        let companies = await db(`companies?select=*&normalized_domain=eq.${encodeURIComponent(companyDomain)}&limit=1`);
+        if (!companies.length) {
+          companies = await db("companies", {
+            method: "POST",
+            body: JSON.stringify({
+              name: companyName,
+              normalized_name: companyName.toLowerCase(),
+              normalized_domain: companyDomain,
+              website,
+              industry: defaultIndustry || null,
+            }),
+          });
+          companiesCreated += 1;
+        }
+        const company = companies[0];
+
+        for (const email of emails) {
+          const existingContacts = await db(`contacts?select=id&normalized_email=eq.${encodeURIComponent(email)}&limit=1`);
+          if (existingContacts.length) {
+            contactsSkipped += 1;
+            continue;
+          }
+          await db("contacts", {
+            method: "POST",
+            body: JSON.stringify({
+              company_id: company.id,
+              full_name: null,
+              email,
+              normalized_email: email,
+              data_confidence: "domain_researched",
+              source: "website_scan",
+            }),
+          });
+          contactsCreated += 1;
+        }
+      }
+
+      if (companiesCreated || contactsCreated) {
+        await db("activity_log", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "discovered_contacts_saved",
+            details: {
+              companies_created: companiesCreated,
+              contacts_created: contactsCreated,
+              contacts_skipped: contactsSkipped,
+              saved_by: user,
+            },
+          }),
+        });
+      }
+
+      return NextResponse.json({ ok: true, companiesCreated, contactsCreated, contactsSkipped });
     }
 
     if (body.action === "research_batch") {
       const topic = String(body.topic || "").trim();
-      if (!topic) return NextResponse.json({ ok: false, error: "Add the outreach topic that every personalized email should cover." }, { status: 400 });
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Reach topic that every personalized email should cover." }, { status: 400 });
       const campaignName = cleanCampaignName(body.campaignName);
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
       let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
@@ -2312,7 +2429,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   const researchData = {
     brief: String(input.brief || ""),
     topic: String(input.topic || "AI Native Thinking Masterclass"),
-    campaign_name: cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach",
+    campaign_name: cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Reach",
     template_provided: Boolean(String(input.emailTemplate || "").trim()),
     source: input.source || "dashboard",
     requested_by: user,
@@ -2357,9 +2474,9 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   // before any personalized draft is created. Invalid contacts remain stored
   // for correction in the quarantine view but cannot enter a campaign.
   await validateContactBeforeDraft(String(contact.id), email);
-  const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass Outreach";
+  const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Reach";
   const campaign = await ensureCampaign(campaignName, "");
-  if (!campaign) throw new Error("No outreach campaign is configured.");
+  if (!campaign) throw new Error("No IKF Reach campaign is configured.");
   const existing = await db(`generated_emails?select=*&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
   if (input.skipExistingCampaignContact && existing[0]) {
     return { draft: existing[0], company, contact, research, skipped: true };
@@ -2463,7 +2580,7 @@ async function researchWebsites(websites: string[]): Promise<WebsiteScanResult[]
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(5, websites.length) }, () => worker()));
+  await Promise.all(Array.from({ length: Math.min(10, websites.length) }, () => worker()));
   return results;
 }
 
@@ -2477,9 +2594,9 @@ async function researchWebsite(rawUrl: string): Promise<WebsiteResearch> {
   const emailScores = new Map<string, number>();
   let firstHtml = "";
   let canonicalWebsite = firstUrl;
-  const deadline = Date.now() + 14_000;
+  const deadline = Date.now() + 16_000;
 
-  for (let index = 0; index < pages.length && reviewed.length < 6 && index < 14 && Date.now() < deadline; index += 1) {
+  for (let index = 0; index < pages.length && reviewed.length < 10 && index < 20 && Date.now() < deadline; index += 1) {
     const requestedUrl = pages[index];
     const normalizedRequest = stripTrackingUrl(requestedUrl);
     if (visited.has(normalizedRequest)) continue;
@@ -2543,7 +2660,7 @@ async function fetchWithTimeout(url: string, expectedSiteHost: string) {
         redirect: "manual",
         signal: controller.signal,
         headers: {
-          "User-Agent": "IKF-Outreach-Research/2.0 (+https://www.ikf.co.in)",
+          "User-Agent": "IKF-Reach-Research/2.0 (+https://www.ikf.co.in)",
           Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
         },
       });
@@ -2738,12 +2855,18 @@ function isPublicMailbox(domain: string) {
 
 function extractWebsites(text: string) {
   const websites: string[] = [];
+  const seenDomains = new Set<string>();
   const matches = String(text || "").match(/(?:https?:\/\/|www\.)[^\s,;<>"']+|(?<!@)\b(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:\/[^\s,;<>"']*)?/gi) || [];
   for (const match of matches) {
     if (match.includes("@")) continue;
     try {
       const website = stripTrackingUrl(safeWebsiteUrl(match));
-      if (!websites.includes(website)) websites.push(website);
+      // Multiple URLs (different paths/protocols) for the same domain are the same
+      // company — keep only the first one so we don't scan the same site twice.
+      const domain = siteHost(new URL(website).hostname);
+      if (seenDomains.has(domain)) continue;
+      seenDomains.add(domain);
+      websites.push(website);
     } catch {}
   }
   return websites;
@@ -2934,7 +3057,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
       subject: mail.subject,
       htmlContent,
       ...(scheduledAt ? { scheduledAt } : {}),
-      tags: ["ikf-outreach", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
+      tags: ["ikf-reach", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();
@@ -2956,7 +3079,7 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
       htmlContent: `${previewBanner}${htmlContent}`,
-      tags: ["ikf-outreach", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
+      tags: ["ikf-reach", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();

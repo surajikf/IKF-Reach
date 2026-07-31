@@ -241,7 +241,7 @@ export async function GET(req: NextRequest) {
         ip: "",
         link: "",
         reason: "",
-        tag: "ikf-outreach",
+        tag: "ikf-reach",
         source: "database",
       };
       addEvent(events, synthetic);
@@ -264,7 +264,7 @@ export async function GET(req: NextRequest) {
       coverage: {
         liveBrevoEvents: liveEvents.length,
         storedWebhookEvents: (storedResult.results || []).length,
-        matchedOutreachEvents: output.length,
+        matchedReachEvents: output.length,
       },
     });
   } catch (error) {
