@@ -31,6 +31,8 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
   const lastEmitted = useRef(value);
   const [fontFamily, setFontFamily] = useState("Calibri");
   const [fontSize, setFontSize] = useState("11");
+  const [linkPromptOpen, setLinkPromptOpen] = useState(false);
+  const [linkUrlInput, setLinkUrlInput] = useState("");
 
   useEffect(() => {
     if (!editorRef.current || value === lastEmitted.current) return;
@@ -99,9 +101,27 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
     emitChange();
   }
 
+  function handlePaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    if (disabled) return;
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    if (!text) return;
+    restoreEditorSelection();
+    const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    document.execCommand("styleWithCSS", false, "false");
+    document.execCommand("insertHTML", false, escaped.split(/\r\n|\r|\n/).join("<br>"));
+    emitChange();
+  }
+
   function addLink() {
     if (disabled) return;
-    const url = window.prompt("Paste the full website or email link");
+    setLinkUrlInput("");
+    setLinkPromptOpen(true);
+  }
+
+  function confirmLink() {
+    const url = linkUrlInput.trim();
+    setLinkPromptOpen(false);
     if (!url) return;
     const normalized = /^(https?:|mailto:|tel:)/i.test(url) ? url : `https://${url}`;
     run("createLink", normalized);
@@ -197,13 +217,33 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
         data-placeholder="Write the campaign email and insert personalization where needed."
         onInput={emitChange}
         onBlur={emitChange}
-        onPaste={() => window.setTimeout(emitChange, 0)}
+        onPaste={handlePaste}
         dangerouslySetInnerHTML={{ __html: value }}
       />
       <div className="rich-composer-footer">
         <span><strong>Calibri 11 pt</strong> is the campaign default.</span>
         <span>Formatting and personalization are saved with this campaign template.</span>
       </div>
+      {linkPromptOpen && (
+        <div className="confirm-modal-backdrop" role="presentation" onClick={() => setLinkPromptOpen(false)}>
+          <div className="confirm-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <p>Paste the full website or email link</p>
+            <input
+              type="text"
+              autoFocus
+              value={linkUrlInput}
+              onChange={(event) => setLinkUrlInput(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") confirmLink(); if (event.key === "Escape") setLinkPromptOpen(false); }}
+              placeholder="www.example.com or name@example.com"
+              style={{ marginTop: 12, width: "100%" }}
+            />
+            <div className="confirm-modal-actions">
+              <button type="button" className="quiet-action" onClick={() => setLinkPromptOpen(false)}>Cancel</button>
+              <button type="button" className="primary-action" onClick={confirmLink}>Insert link</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

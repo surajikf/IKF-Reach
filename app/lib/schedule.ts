@@ -13,7 +13,7 @@ export function buildCampaignSchedule(
     throw new Error(`Choose a start time inside the ${policy.sending_window_start || "10:00"}–${policy.sending_window_end || "17:00"} Asia/Kolkata sending window.`);
   }
 
-  const safeBatchSize = Math.max(1, Math.min(3, Math.floor(Number(batchSize) || 1)));
+  const safeBatchSize = Math.max(1, Math.min(count, Math.floor(Number(batchSize) || 1)));
   const safeGapMinutes = Math.max(1, Math.min(60, Math.floor(Number(gapMinutes) || 1)));
   const dailyLimit = Math.max(1, Math.min(1000, Number(policy.daily_limit || 25)));
   const dayCounts = new Map<string, number>();

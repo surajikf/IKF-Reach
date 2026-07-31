@@ -54,7 +54,14 @@ test("document and website contacts are validated before drafts are created", ()
 test("all approval and delivery paths enforce validation", () => {
   assert.match(control, /This address has not completed email validation/);
   assert.match(control, /\["invalid", "unknown"\]\.includes/);
-  assert.ok((control.match(/await assertContactsDeliverable/g) || []).length >= 9);
+  // Single/explicit-recipient paths throw via assertContactsDeliverable; bulk paths
+  // (batch schedule/send/approve) silently skip undeliverable contacts via
+  // filterDeliverableContacts instead of failing the whole batch — both route through
+  // the same checkContactsDeliverability gate, so count them together.
+  assert.ok(
+    (control.match(/await assertContactsDeliverable/g) || []).length
+    + (control.match(/await filterDeliverableContacts/g) || []).length >= 9,
+  );
   assert.match(control, /event IN \('hardBounce', 'blocked', 'invalid', 'spam', 'unsubscribed'\)/);
 });
 

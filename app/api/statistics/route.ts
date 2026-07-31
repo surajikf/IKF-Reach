@@ -83,6 +83,25 @@ async function supabase(path: string) {
   return text ? JSON.parse(text) : [];
 }
 
+// Supabase/PostgREST hard-caps every response at its db-max-rows setting (1000)
+// regardless of the requested `limit`, so reading past that requires paging with offset.
+async function fetchAllRows(baseQuery: string, cap = 5000) {
+  const pageSize = 1000;
+  const separator = baseQuery.includes("?") ? "&" : "?";
+  const firstPage = await supabase(`${baseQuery}${separator}limit=${pageSize}&offset=0`);
+  if (firstPage.length < pageSize) return firstPage;
+  const remainingPages = Math.max(0, Math.ceil(cap / pageSize) - 1);
+  const morePages = await Promise.all(
+    Array.from({ length: remainingPages }, (_, i) => supabase(`${baseQuery}${separator}limit=${pageSize}&offset=${(i + 1) * pageSize}`)),
+  );
+  const rows = [...firstPage];
+  for (const page of morePages) {
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows;
+}
+
 async function brevoEvents(startDate: string, endDate: string) {
   const key = process.env.BREVO_API_KEY;
   if (!key) throw new Error("Brevo is not configured.");
@@ -129,10 +148,10 @@ export async function GET(req: NextRequest) {
   try {
     const { startDate, endDate, start, end } = parseRange(req);
     const [campaigns, generatedEmails, contacts, sends, storedResult] = await Promise.all([
-      supabase("campaigns?select=id,name,status,sender_name,sender_email,created_at&order=created_at.desc&limit=1000"),
-      supabase("generated_emails?select=id,contact_id,campaign_id,subject,status,generated_at&order=generated_at.desc&limit=2000"),
-      supabase("contacts?select=id,email,full_name&limit=2000"),
-      supabase("email_sends?select=id,generated_email_id,campaign_id,sender_email,recipient_email,subject,brevo_message_id,status,sent_at,created_at&order=created_at.desc&limit=5000"),
+      fetchAllRows("campaigns?select=id,name,status,sender_name,sender_email,created_at&order=created_at.desc", 5000),
+      fetchAllRows("generated_emails?select=id,contact_id,campaign_id,subject,status,generated_at&order=generated_at.desc", 10000),
+      fetchAllRows("contacts?select=id,email,full_name", 10000),
+      fetchAllRows("email_sends?select=id,generated_email_id,campaign_id,sender_email,recipient_email,subject,brevo_message_id,status,sent_at,created_at&order=created_at.desc", 10000),
       getQueueDb().prepare(`
         SELECT * FROM email_analytics_events
         WHERE event_at >= ? AND event_at <= ?

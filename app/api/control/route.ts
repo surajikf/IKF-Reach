@@ -36,12 +36,22 @@ const supabaseKey = () => process.env.SUPABASE_SECRET_KEY || "";
 const sender = { name: process.env.BREVO_SENDER_NAME || "Tanishka", email: process.env.BREVO_SENDER_EMAIL || "tanishka@iknowai.in" };
 const replyTo = () => process.env.BREVO_REPLY_TO_EMAIL || "tanishka@iknowai.in";
 
+const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
+
 function actor(req: NextRequest) {
   return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
 }
 
-function canManage(_req: NextRequest) {
-  return true;
+function isLocalRequest(req: NextRequest) {
+  const host = (req.headers.get("host") || "").toLowerCase();
+  return host.includes("localhost") || host.includes("127.0.0.1");
+}
+
+function canManage(req: NextRequest) {
+  if (isLocalRequest(req)) return true;
+  if (allowedOperators.has(actor(req))) return true;
+  const accessKey = process.env.IKF_ACCESS_KEY || "";
+  return Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey;
 }
 
 async function db(path: string, init: RequestInit = {}) {
@@ -79,14 +89,14 @@ async function fetchAllRows(baseQuery: string, cap = 5000) {
   return rows;
 }
 
-async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
+async function checkContactsDeliverability(contacts: Array<Record<string, any>>) {
   const recipients = contacts
     .filter((contact) => contact?.id && contact?.email)
     .map((contact) => ({
       id: String(contact.id),
       email: normalizeEmailAddress(contact.email),
   }));
-  if (!recipients.length) throw new Error("No deliverable recipients were found.");
+  if (!recipients.length) return { recipients, blocked: new Map<string, string>() };
   const queueDb = getQueueDb();
   const validationRows: Array<Record<string, any>> = [];
   const eventRows: Array<Record<string, any>> = [];
@@ -152,12 +162,33 @@ async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
   for (const row of suppressionRows) {
     blocked.set(normalizeEmailAddress(row.email), String(row.reason || "This address is permanently suppressed."));
   }
+  return { recipients, blocked };
+}
+
+// Strict gate for single-item actions (approve one, send one) — a person is looking at
+// this exact recipient, so surface the problem rather than silently doing nothing.
+async function assertContactsDeliverable(contacts: Array<Record<string, any>>) {
+  const { recipients, blocked } = await checkContactsDeliverability(contacts);
+  if (!recipients.length) throw new Error("No deliverable recipients were found.");
   if (blocked.size) {
     const samples = [...blocked.entries()].slice(0, 4).map(([email, reason]) => `${email} (${reason})`);
     throw new Error(
       `${blocked.size} recipient${blocked.size === 1 ? " is" : "s are"} unvalidated or quarantined and cannot be sent: ${samples.join("; ")}${blocked.size > samples.length ? "; and more" : ""}. Complete validation or remove them before delivery.`,
     );
   }
+}
+
+// Smart gate for bulk actions (approve/schedule/send a whole batch or campaign) — instead of
+// blocking the entire batch over a handful of bad addresses, silently drop the undeliverable
+// contacts (invalid, unvalidated, hard-bounced, suppressed) and let the good ones through.
+// Callers use blockedContactIds to filter the rows they're about to act on.
+async function filterDeliverableContacts(contacts: Array<Record<string, any>>) {
+  const { recipients, blocked } = await checkContactsDeliverability(contacts);
+  const blockedContactIds = new Set(
+    recipients.filter((recipient) => blocked.has(recipient.email)).map((recipient) => recipient.id),
+  );
+  const blockedDetails = [...blocked.entries()].map(([email, reason]) => ({ email, reason }));
+  return { blockedContactIds, blockedDetails };
 }
 
 async function contactsForGeneratedEmails(rows: Array<Record<string, any>>) {
@@ -448,18 +479,29 @@ Please let me know a suitable time to connect.`;
 
 export async function GET(req: NextRequest) {
   try {
-    const [queue, researchAudit, backgroundJobs, allSettings, campaigns, emails, contacts, companies, sends, activityRows] = await Promise.all([
-      db("outreach_queue?select=*&order=created_at.desc&limit=1000"),
+    // Lightweight path for the frequent while-a-job-is-active poll: background job progress
+    // comes from a cheap D1 query, not Supabase, so it doesn't need the full dashboard refetch
+    // (contacts/companies/emails/etc.) that the normal load does — that refetch is what made
+    // every poll expensive once those tables grew past a few thousand rows.
+    if (req.nextUrl.searchParams.get("jobsOnly") === "1") {
+      const backgroundJobs = await listBackgroundJobs();
+      return NextResponse.json({ ok: true, jobs: backgroundJobs });
+    }
+
+    const [queue, researchAudit, backgroundJobs, allSettings, campaigns, emails, contacts, companies, sends, activityRows, unsubscribedRows] = await Promise.all([
+      fetchAllRows("outreach_queue?select=*&order=created_at.desc", 5000),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
       listBackgroundJobs(),
       db("outreach_settings?select=key,value"),
       db("campaigns?select=id,name,status,sender_name,sender_email&status=neq.deleted&order=created_at.desc"),
-      db("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&status=neq.campaign_deleted&order=generated_at.desc&limit=1000"),
+      fetchAllRows("generated_emails?select=id,contact_id,company_id,campaign_id,subject,html_body,status,version,generated_at&status=neq.campaign_deleted&order=generated_at.desc", 5000),
       fetchAllRows("contacts?select=id,company_id,email,full_name,job_title,data_confidence,source,created_at&order=created_at.desc", 10000),
       fetchAllRows("companies?select=id,name,website,normalized_domain,industry,country,research_data,updated_at&order=updated_at.desc", 10000),
-      db("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc&limit=1000"),
+      fetchAllRows("email_sends?select=id,generated_email_id,status,sent_at,created_at&order=created_at.desc", 5000),
       db("activity_log?select=id,company_id,contact_id,action,details,created_at&order=created_at.desc&limit=100"),
+      getQueueDb().prepare("SELECT normalized_email FROM email_suppressions WHERE active = 1 AND source_event = 'unsubscribed'").all<{ normalized_email: string }>(),
     ]);
+    const unsubscribedEmails = new Set((unsubscribedRows.results || []).map((row) => row.normalized_email));
     const sendingSettings = allSettings.find((item: Record<string, any>) => item.key === "sending_policy");
     const replyToByCampaign = new Map(
       allSettings
@@ -487,6 +529,7 @@ export async function GET(req: NextRequest) {
       const latestSend = latestSendByEmailId.get(item.id);
       return {
         id: item.id,
+        contactId: item.contact_id || null,
         recipient: contact.email || "",
         recipientName: contact.full_name || "",
         company: company.name || "Unknown organization",
@@ -521,6 +564,7 @@ export async function GET(req: NextRequest) {
         companyWebsite: company.website || null,
         companyCountry: company.country || null,
         createdAt: item.created_at,
+        unsubscribed: unsubscribedEmails.has(String(item.email || "").trim().toLowerCase()),
       };
     });
     const liveCompanies = companies.map((item: Record<string, any>) => ({
@@ -692,7 +736,7 @@ export async function POST(req: NextRequest) {
           WHERE job_id = ? AND status IN ('queued', 'researching')
         `).bind(now, jobId),
       ]);
-      const preservedDrafts = await db(`generated_emails?select=id&campaign_id=eq.${encodeURIComponent(String(job.campaign_id))}&limit=1000`);
+      const preservedDrafts = await db(`generated_emails?select=id&campaign_id=eq.${encodeURIComponent(String(job.campaign_id))}&limit=1`);
       const campaignStatus = preservedDrafts.length > 0 ? "draft_pending_review" : "research_cancelled";
       await db(`campaigns?id=eq.${encodeURIComponent(String(job.campaign_id))}`, { method: "PATCH", body: JSON.stringify({ status: campaignStatus }) });
       await db("activity_log", {
@@ -1295,7 +1339,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.action === "clean_unresolved_placeholders") {
-      const rows = await db("generated_emails?select=id,html_body,status&status=in.(draft_pending_review,approved)&limit=1000");
+      const rows = await fetchAllRows("generated_emails?select=id,html_body,status&status=in.(draft_pending_review,approved)", 10000);
       const changed = rows
         .map((item: Record<string, any>) => ({ ...item, cleanHtml: cleanupUnresolvedHtml(item.html_body) }))
         .filter((item: Record<string, any>) => item.cleanHtml !== item.html_body);
@@ -1318,7 +1362,7 @@ export async function POST(req: NextRequest) {
 
     if (body.action === "refresh_unsent_draft_names") {
       const dryRun = body.dryRun !== false;
-      const drafts = await db("generated_emails?select=id,contact_id,html_body,status,personalization_data&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=5000");
+      const drafts = await fetchAllRows("generated_emails?select=id,contact_id,html_body,status,personalization_data&status=in.(draft_pending_review,approved)&order=generated_at.asc", 10000);
       const contactIds = [...new Set(drafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
       const contactRows: Array<Record<string, any>> = [];
       for (const group of chunk(contactIds, 50)) {
@@ -1393,13 +1437,84 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    if (body.action === "normalize_draft_fonts") {
+      const dryRun = body.dryRun !== false;
+      const drafts = await db("generated_emails?select=id,html_body,status&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=5000");
+      const draftChanges = (drafts as Array<Record<string, any>>).flatMap((draft) => {
+        const nextHtml = stripFontFamilyOverrides(draft.html_body);
+        return nextHtml === draft.html_body ? [] : [{ id: String(draft.id), html: nextHtml }];
+      });
+      if (!dryRun) {
+        for (const group of chunk(draftChanges, 20)) {
+          await Promise.all(group.map((change) =>
+            db(`generated_emails?id=eq.${change.id}&status=in.(draft_pending_review,approved)`, {
+              method: "PATCH",
+              body: JSON.stringify({ html_body: change.html }),
+            })
+          ));
+        }
+      }
+
+      const queueDb = getQueueDb();
+      const jobsResult = await queueDb.prepare("SELECT id, email_template FROM background_research_jobs").all();
+      const jobs = (jobsResult.results || []) as Array<Record<string, any>>;
+      const jobChanges = jobs.flatMap((job) => {
+        const nextTemplate = stripFontFamilyOverrides(String(job.email_template || ""));
+        return nextTemplate === job.email_template ? [] : [{ id: String(job.id), template: nextTemplate }];
+      });
+      if (!dryRun && jobChanges.length) {
+        await queueDb.batch(jobChanges.map((change) =>
+          queueDb.prepare("UPDATE background_research_jobs SET email_template = ? WHERE id = ?").bind(change.template, change.id),
+        ));
+      }
+
+      if (!dryRun && (draftChanges.length || jobChanges.length)) {
+        await db("activity_log", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "draft_fonts_normalized",
+            details: {
+              scanned_drafts: drafts.length,
+              updated_drafts: draftChanges.length,
+              scanned_campaign_templates: jobs.length,
+              updated_campaign_templates: jobChanges.length,
+              sent_and_scheduled_excluded: true,
+              updated_by: user,
+            },
+          }),
+        });
+      }
+      return NextResponse.json({
+        ok: true,
+        dryRun,
+        scannedDrafts: drafts.length,
+        wouldUpdateDrafts: draftChanges.length,
+        updatedDrafts: dryRun ? 0 : draftChanges.length,
+        scannedCampaignTemplates: jobs.length,
+        wouldUpdateCampaignTemplates: jobChanges.length,
+        updatedCampaignTemplates: dryRun ? 0 : jobChanges.length,
+        eligibleStatuses: ["draft_pending_review", "approved"],
+        sentAndScheduledExcluded: true,
+      });
+    }
+
     if (body.action === "approve_batch") {
       const ids = cleanIds(body.emailIds);
       if (!ids.length) return NextResponse.json({ ok: false, error: "Select at least one email." }, { status: 400 });
-      const pending = await db(`generated_emails?select=id,contact_id&id=in.(${ids.join(",")})&limit=5000`);
-      await assertContactsDeliverable(await contactsForGeneratedEmails(pending));
-      await db(`generated_emails?id=in.(${ids.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
-      return NextResponse.json({ ok: true, count: ids.length });
+      const pending: Array<Record<string, any>> = [];
+      for (const idGroup of chunk(ids, 100)) {
+        pending.push(...await db(`generated_emails?select=id,contact_id&id=in.(${idGroup.join(",")})&limit=5000`));
+      }
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(await contactsForGeneratedEmails(pending));
+      const approvable = pending.filter((row: Record<string, any>) => !blockedContactIds.has(String(row.contact_id)));
+      if (!approvable.length) {
+        return NextResponse.json({ ok: false, error: `All ${pending.length} selected email${pending.length === 1 ? "" : "s"} are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
+      const approvableIds = approvable.map((row: Record<string, any>) => row.id);
+      for (const idGroup of chunk(approvableIds, 100)) {
+        await db(`generated_emails?id=in.(${idGroup.join(",")})`, { method: "PATCH", body: JSON.stringify({ status: "approved" }) });
+      }
+      return NextResponse.json({ ok: true, count: approvableIds.length, skipped: pending.length - approvableIds.length, skippedDetails: blockedDetails });
     }
 
     if (body.action === "approve_campaign") {
@@ -1409,19 +1524,26 @@ export async function POST(req: NextRequest) {
       }
       const pending = await db(`generated_emails?select=id,contact_id&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review&limit=5000`);
       if (!pending.length) return NextResponse.json({ ok: true, count: 0 });
-      await assertContactsDeliverable(await contactsForGeneratedEmails(pending));
-      await db(`generated_emails?campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.draft_pending_review`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "approved" }),
-      });
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(await contactsForGeneratedEmails(pending));
+      const approvable = pending.filter((row: Record<string, any>) => !blockedContactIds.has(String(row.contact_id)));
+      if (!approvable.length) {
+        return NextResponse.json({ ok: false, error: `All ${pending.length} pending email${pending.length === 1 ? "" : "s"} in this campaign are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
+      const approvableIds = approvable.map((row: Record<string, any>) => row.id);
+      for (const idGroup of chunk(approvableIds, 100)) {
+        await db(`generated_emails?id=in.(${idGroup.join(",")})`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "approved" }),
+        });
+      }
       await db("activity_log", {
         method: "POST",
         body: JSON.stringify({
           action: "campaign_drafts_approved",
-          details: { campaign_id: campaignId, approved_count: pending.length, approved_by: user },
+          details: { campaign_id: campaignId, approved_count: approvableIds.length, skipped_count: pending.length - approvableIds.length, approved_by: user },
         }),
       });
-      return NextResponse.json({ ok: true, count: pending.length });
+      return NextResponse.json({ ok: true, count: approvableIds.length, skipped: pending.length - approvableIds.length, skippedDetails: blockedDetails });
     }
 
     if (body.action === "schedule") {
@@ -1443,7 +1565,7 @@ export async function POST(req: NextRequest) {
       const contact = contacts[0];
       await assertContactsDeliverable([contact]);
       const usedSender = await senderForMail(mail);
-      const result = await submitBrevo(mail, contact, scheduledAt.toISOString());
+      const result = await submitBrevo(mail, contact, scheduledAt.toISOString(), req.nextUrl.origin);
       const rows = await db("outreach_queue", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, status: "scheduled_with_brevo", scheduled_for: scheduledAt.toISOString(), approved_by: user, approved_at: new Date().toISOString() }) });
       await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: `scheduled:${scheduledAt.toISOString()}` }) });
       await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "scheduled" }) });
@@ -1482,14 +1604,19 @@ export async function POST(req: NextRequest) {
       if (!insideIndiaWindow(start, windowStart, windowEnd) || !insideIndiaWindow(finalTime, windowStart, windowEnd)) {
         return NextResponse.json({ ok: false, error: `Keep the full batch inside the ${windowStart}–${windowEnd} Asia/Kolkata sending window.` }, { status: 400 });
       }
-      const mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
+      let mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
       if (mails.some((mail: Record<string, any>) => mail.status !== "approved")) {
         return NextResponse.json({ ok: false, error: "Approve every selected email before scheduling." }, { status: 409 });
       }
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
-      await assertContactsDeliverable(contacts);
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(contacts);
+      const skippedCount = mails.filter((mail: Record<string, any>) => blockedContactIds.has(String(mail.contact_id))).length;
+      mails = mails.filter((mail: Record<string, any>) => !blockedContactIds.has(String(mail.contact_id)));
+      if (!mails.length) {
+        return NextResponse.json({ ok: false, error: `All ${ids.length} selected email${ids.length === 1 ? "" : "s"} are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
       const scheduled: Array<Record<string, any>> = [];
 
       for (let index = 0; index < mails.length; index += 1) {
@@ -1500,7 +1627,7 @@ export async function POST(req: NextRequest) {
         if (new Date(scheduledAt).getTime() > now + 72 * 60 * 60_000) {
           throw new Error("The spacing pushes part of this batch beyond Brevo’s 72-hour scheduling limit.");
         }
-        const result = await submitBrevo(mail, contact, scheduledAt);
+        const result = await submitBrevo(mail, contact, scheduledAt, req.nextUrl.origin);
         const usedSender = await senderForMail(mail);
         const queueId = crypto.randomUUID();
         await db("outreach_queue", {
@@ -1535,7 +1662,7 @@ export async function POST(req: NextRequest) {
         await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "scheduled" }) });
         scheduled.push({ id: mail.id, messageId: result.messageId, scheduledAt });
       }
-      return NextResponse.json({ ok: true, count: scheduled.length, scheduled });
+      return NextResponse.json({ ok: true, count: scheduled.length, scheduled, skipped: skippedCount, skippedDetails: blockedDetails });
     }
 
     if (body.action === "schedule_campaign") {
@@ -1550,20 +1677,30 @@ export async function POST(req: NextRequest) {
       if (start.getTime() > now + 72 * 60 * 60_000) {
         return NextResponse.json({ ok: false, error: "Brevo accepts scheduled transactional emails up to 72 hours ahead." }, { status: 400 });
       }
-      const [settingsRows, campaignRows, mails] = await Promise.all([
+      const [settingsRows, campaignRows, allMails] = await Promise.all([
         db("outreach_settings?select=*&key=eq.sending_policy"),
         db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
-        db(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc&limit=1000`),
+        fetchAllRows(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc`, 10000),
       ]);
       const policy = settingsRows[0]?.value || {};
       if (policy.paused) return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” in Controls & APIs before scheduling." }, { status: 409 });
       const campaign = campaignRows[0];
       if (!campaign) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
-      if (!mails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unscheduled emails." }, { status: 400 });
-      if (mails.length > 600) return NextResponse.json({ ok: false, error: "Schedule up to 600 approved emails in one campaign." }, { status: 400 });
+      if (!allMails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unscheduled emails." }, { status: 400 });
+      const allContactIds = [...new Set(allMails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const allContacts: Array<Record<string, any>> = [];
+      for (const idGroup of chunk(allContactIds, 80)) {
+        allContacts.push(...await db(`contacts?select=*&id=in.(${idGroup.join(",")})`));
+      }
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(allContacts);
+      const mails = allMails.filter((mail: Record<string, any>) => !blockedContactIds.has(String(mail.contact_id)));
+      const skippedCount = allMails.length - mails.length;
+      if (!mails.length) {
+        return NextResponse.json({ ok: false, error: `All ${allMails.length} approved email${allMails.length === 1 ? "" : "s"} in this campaign are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
       const globalMinimumGap = Math.max(1, Math.min(60, Number(policy.minimum_delay_minutes || 1)));
       const delayMinutes = Math.max(globalMinimumGap, Math.min(60, Number(body.delayMinutes || globalMinimumGap)));
-      const batchSize = Math.max(1, Math.min(3, Number(body.batchSize || 1)));
+      const batchSize = Math.max(1, Math.min(mails.length, Number(body.batchSize || 1)));
       let scheduleTimes: Date[];
       try {
         scheduleTimes = buildCampaignSchedule(start, mails.length, batchSize, delayMinutes, policy);
@@ -1576,10 +1713,7 @@ export async function POST(req: NextRequest) {
           error: "This campaign would extend beyond Brevo’s 72-hour scheduling horizon. Increase the daily limit, reduce spacing, widen the sending window, or schedule a smaller campaign.",
         }, { status: 400 });
       }
-      const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
-      const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
-      const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
-      await assertContactsDeliverable(contacts);
+      const contactById = new Map(allContacts.map((item: Record<string, any>) => [item.id, item]));
       const results: Array<Record<string, any>> = new Array(mails.length);
       let cursor = 0;
       async function scheduleWorker() {
@@ -1593,7 +1727,7 @@ export async function POST(req: NextRequest) {
           }
           try {
             const scheduledAt = scheduleTimes[index].toISOString();
-            const result = await submitBrevo(mail, contact, scheduledAt);
+            const result = await submitBrevo(mail, contact, scheduledAt, req.nextUrl.origin);
             results[index] = { ok: true, mail, contact, scheduledAt, messageId: result.messageId };
           } catch (error) {
             results[index] = { ok: false, mail, contact, error: error instanceof Error ? error.message : "Brevo scheduling failed." };
@@ -1667,6 +1801,8 @@ export async function POST(req: NextRequest) {
         firstScheduledFor: successful[0]?.scheduledAt || null,
         lastScheduledFor: successful.at(-1)?.scheduledAt || null,
         errors: results.filter((item) => item && !item.ok).slice(0, 10).map((item) => ({ emailId: item.mail?.id, error: item.error })),
+        skipped: skippedCount,
+        skippedDetails: blockedDetails,
       }, { status: successful.length ? 200 : 502 });
     }
 
@@ -1685,7 +1821,7 @@ export async function POST(req: NextRequest) {
       if (!contact?.email) return NextResponse.json({ ok: false, error: "The selected draft has no valid recipient." }, { status: 400 });
       await assertContactsDeliverable([contact]);
       const usedSender = await senderForMail(mail);
-      const result = await submitBrevo(mail, contact);
+      const result = await submitBrevo(mail, contact, undefined, req.nextUrl.origin);
       await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
       await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
       return NextResponse.json({ ok: true, messageId: result.messageId });
@@ -1710,7 +1846,7 @@ export async function POST(req: NextRequest) {
       for (const mail of mails) {
         const originalContact = contactById.get(mail.contact_id) || {};
         for (const testRecipient of testRecipients) {
-          const result = await submitTestBrevo(mail, testRecipient, originalContact.email || "unknown");
+          const result = await submitTestBrevo(mail, testRecipient, originalContact.email || "unknown", originalContact.id, req.nextUrl.origin);
           await db("activity_log", {
             method: "POST",
             body: JSON.stringify({
@@ -1742,67 +1878,96 @@ export async function POST(req: NextRequest) {
       if (settingsRows[0]?.value?.paused) {
         return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” first." }, { status: 409 });
       }
-      const mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
+      let mails = await db(`generated_emails?select=*&id=in.(${ids.join(",")})`);
       if (mails.some((mail: Record<string, any>) => mail.status !== "approved")) {
         return NextResponse.json({ ok: false, error: "Approve every selected email before sending." }, { status: 409 });
       }
       const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
       const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
       const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
-      await assertContactsDeliverable(contacts);
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(contacts);
+      const skippedCount = mails.filter((mail: Record<string, any>) => blockedContactIds.has(String(mail.contact_id))).length;
+      mails = mails.filter((mail: Record<string, any>) => !blockedContactIds.has(String(mail.contact_id)));
+      if (!mails.length) {
+        return NextResponse.json({ ok: false, error: `All ${ids.length} selected email${ids.length === 1 ? "" : "s"} are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
       const sent: string[] = [];
       for (const mail of mails) {
         const contact = contactById.get(mail.contact_id);
         if (!contact?.email) continue;
         const usedSender = await senderForMail(mail);
-        const result = await submitBrevo(mail, contact);
+        const result = await submitBrevo(mail, contact, undefined, req.nextUrl.origin);
         await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
         await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
         sent.push(mail.id);
       }
-      return NextResponse.json({ ok: true, count: sent.length });
+      return NextResponse.json({ ok: true, count: sent.length, skipped: skippedCount, skippedDetails: blockedDetails });
     }
 
     if (body.action === "send_campaign") {
       const campaignId = String(body.campaignId || "");
       if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
       if (body.confirmText !== "SEND CAMPAIGN") return NextResponse.json({ ok: false, error: "Type SEND CAMPAIGN to confirm immediate delivery." }, { status: 400 });
-      const [settingsRows, campaignRows, mails] = await Promise.all([
+      // Processed in small, bounded batches (not one giant request looping over every approved
+      // email) so a single call always finishes quickly. Naturally resumable: each call re-queries
+      // status=eq.approved fresh, so anything already flipped to "sent" simply drops out of scope —
+      // calling this again after an interruption just picks up the remainder, no duplicates.
+      const batchLimit = Math.max(1, Math.min(60, Math.trunc(Number(body.batchLimit)) || 40));
+      const [settingsRows, campaignRows, allMails] = await Promise.all([
         db("outreach_settings?select=*&key=eq.sending_policy"),
         db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
-        db(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc&limit=1000`),
+        fetchAllRows(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc`, 10000),
       ]);
       const policy = settingsRows[0]?.value || {};
       if (policy.paused) return NextResponse.json({ ok: false, error: "Sending is paused. Turn off “Pause all” before sending this campaign." }, { status: 409 });
       if (!campaignRows[0]) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
-      if (!mails.length) return NextResponse.json({ ok: false, error: "This campaign has no approved, unsent emails." }, { status: 400 });
-      const dailyLimit = Math.max(1, Math.min(1000, Number(policy.daily_limit || 25)));
-      if (mails.length > dailyLimit) {
-        return NextResponse.json({ ok: false, error: `This campaign has ${mails.length} approved emails, above the ${dailyLimit}-email daily limit. Schedule it instead or reduce the audience.` }, { status: 400 });
+      if (!allMails.length) return NextResponse.json({ ok: true, sent: 0, failed: 0, failures: [], skipped: 0, skippedDetails: [], remaining: 0, totalApproved: 0 });
+      const allContactIds = [...new Set(allMails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const allContacts: Array<Record<string, any>> = [];
+      for (const idGroup of chunk(allContactIds, 80)) {
+        allContacts.push(...await db(`contacts?select=*&id=in.(${idGroup.join(",")})`));
       }
-      const contactIds = [...new Set(mails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
-      const contacts = contactIds.length ? await db(`contacts?select=*&id=in.(${contactIds.join(",")})`) : [];
-      const contactById = new Map(contacts.map((item: Record<string, any>) => [item.id, item]));
-      await assertContactsDeliverable(contacts);
+      const contactById = new Map(allContacts.map((item: Record<string, any>) => [item.id, item]));
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(allContacts);
+      const deliverableMails = allMails.filter((mail: Record<string, any>) => !blockedContactIds.has(String(mail.contact_id)));
+      const skippedCount = allMails.length - deliverableMails.length;
+      if (!deliverableMails.length) {
+        return NextResponse.json({ ok: false, error: `All ${allMails.length} approved email${allMails.length === 1 ? "" : "s"} in this campaign are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
+      const batch = deliverableMails.slice(0, batchLimit);
       const sent: string[] = [];
       const failures: Array<{ id: string; error: string }> = [];
-      for (const mail of mails) {
-        const contact = contactById.get(mail.contact_id);
-        if (!contact?.email) {
-          failures.push({ id: mail.id, error: "Recipient email is missing." });
-          continue;
-        }
-        try {
-          const usedSender = await senderForMail(mail);
-          const result = await submitBrevo(mail, contact);
-          await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
-          await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
-          sent.push(mail.id);
-        } catch (error) {
-          failures.push({ id: mail.id, error: error instanceof Error ? error.message : "Brevo rejected this email." });
+      let cursor = 0;
+      async function sendWorker() {
+        while (cursor < batch.length) {
+          const mail = batch[cursor++];
+          const contact = contactById.get(mail.contact_id);
+          if (!contact?.email) {
+            failures.push({ id: mail.id, error: "Recipient email is missing." });
+            continue;
+          }
+          try {
+            const usedSender = await senderForMail(mail);
+            const result = await submitBrevo(mail, contact, undefined, req.nextUrl.origin);
+            await db("email_sends", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: new Date().toISOString() }) });
+            await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
+            sent.push(mail.id);
+          } catch (error) {
+            failures.push({ id: mail.id, error: error instanceof Error ? error.message : "Brevo rejected this email." });
+          }
         }
       }
-      return NextResponse.json({ ok: true, sent: sent.length, failed: failures.length, failures });
+      await Promise.all(Array.from({ length: Math.min(8, batch.length) }, () => sendWorker()));
+      return NextResponse.json({
+        ok: true,
+        sent: sent.length,
+        failed: failures.length,
+        failures,
+        skipped: skippedCount,
+        skippedDetails: blockedDetails,
+        remaining: deliverableMails.length - batch.length,
+        totalApproved: allMails.length,
+      });
     }
 
     if (body.action === "cancel_scheduled") {
@@ -2318,8 +2483,9 @@ async function assertBackgroundJobActive(jobId: string) {
 async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>) {
   const campaignId = String(job.campaign_id || "");
   if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return 0;
-  const drafts = await db(
-    `generated_emails?select=id,contact_id,company_id,status,personalization_data&campaign_id=eq.${encodeURIComponent(campaignId)}&status=in.(draft_pending_review,approved)&order=generated_at.asc&limit=1000`,
+  const drafts = await fetchAllRows(
+    `generated_emails?select=id,contact_id,company_id,status,personalization_data&campaign_id=eq.${encodeURIComponent(campaignId)}&status=in.(draft_pending_review,approved)&order=generated_at.asc`,
+    10000,
   );
   const outdatedDrafts = drafts.filter((draft: Record<string, any>) =>
     Number(draft.personalization_data?.formatting_version || 0) < 4
@@ -2328,9 +2494,16 @@ async function refreshBackgroundCampaignDraftFormatting(job: Record<string, any>
 
   const contactIds = [...new Set(outdatedDrafts.map((draft: Record<string, any>) => String(draft.contact_id || "")).filter(Boolean))];
   const companyIds = [...new Set(outdatedDrafts.map((draft: Record<string, any>) => String(draft.company_id || "")).filter(Boolean))];
+  async function fetchByIdChunks(table: string, select: string, ids: string[]) {
+    const rows: Array<Record<string, any>> = [];
+    for (const idGroup of chunk(ids, 80)) {
+      rows.push(...await db(`${table}?select=${select}&id=in.(${idGroup.join(",")})`));
+    }
+    return rows;
+  }
   const [contacts, companies, campaigns] = await Promise.all([
-    contactIds.length ? db(`contacts?select=id,email,full_name&id=in.(${contactIds.join(",")})`) : Promise.resolve([]),
-    companyIds.length ? db(`companies?select=id,name&id=in.(${companyIds.join(",")})`) : Promise.resolve([]),
+    fetchByIdChunks("contacts", "id,email,full_name", contactIds),
+    fetchByIdChunks("companies", "id,name", companyIds),
     db(`campaigns?select=id,sender_name&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
   ]);
   const contactById = new Map(contacts.map((contact: Record<string, any>) => [String(contact.id), contact]));
@@ -3021,6 +3194,20 @@ function personalizeStoredGreeting(html: string, name: string) {
   return rewriteStoredGreeting(html, name);
 }
 
+function stripFontFamilyOverrides(html: string) {
+  return String(html || "")
+    .replace(/\s+face="[^"]*"/gi, "")
+    .replace(/\s+style="([^"]*)"/gi, (match, styleValue) => {
+      if (!/font-family\s*:/i.test(styleValue)) return match;
+      const cleaned = String(styleValue)
+        .split(";")
+        .map((declaration) => declaration.trim())
+        .filter((declaration) => declaration && !/^font-family\s*:/i.test(declaration))
+        .join(";");
+      return cleaned ? ` style="${cleaned}"` : "";
+    });
+}
+
 function cleanIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(String).filter((id) => /^[0-9a-f-]{36}$/i.test(id)))];
@@ -3042,11 +3229,18 @@ async function replyToForMail(mail: Record<string, any>) {
   return campaignReplyTo(mail.campaign_id);
 }
 
-async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string) {
+async function submitBrevo(mail: Record<string, any>, contact: Record<string, any>, scheduledAt?: string, baseUrl?: string) {
   const inferredName = inferContactName(contact.email, contact.full_name);
-  const htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferredName);
+  let htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferredName);
   const campaignSender = await senderForMail(mail);
   const campaignReplyToEmail = await replyToForMail(mail);
+  const unsubscribeHeaders: Record<string, string> = {};
+  if (baseUrl && contact.id && contact.email) {
+    const unsubscribeUrl = `${baseUrl}/api/unsubscribe?contact=${encodeURIComponent(String(contact.id))}&email=${encodeURIComponent(String(contact.email))}`;
+    unsubscribeHeaders["List-Unsubscribe"] = `<mailto:${campaignReplyToEmail}?subject=unsubscribe>, <${unsubscribeUrl}>`;
+    unsubscribeHeaders["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+    htmlContent += `<p style="font-family:Calibri,Arial,sans-serif;font-size:9pt;color:#8993a0;margin-top:24px">Don't want to hear from us again? <a href="${unsubscribeUrl}" style="color:#8993a0">Unsubscribe</a>.</p>`;
+  }
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
@@ -3057,6 +3251,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
       subject: mail.subject,
       htmlContent,
       ...(scheduledAt ? { scheduledAt } : {}),
+      ...(Object.keys(unsubscribeHeaders).length ? { headers: unsubscribeHeaders } : {}),
       tags: ["ikf-reach", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
@@ -3065,11 +3260,18 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
   return result;
 }
 
-async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string) {
+async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string, originalContactId?: string, baseUrl?: string) {
   const previewBanner = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.45;margin:0 0 18px;padding:12px 14px;border:1px solid #a9dce9;border-radius:8px;background:#eefaff;color:#155d73"><strong>TEST PREVIEW</strong><br>This copy was sent to ${testRecipient} for review. The intended recipient is ${originalRecipient}. The original draft has not been marked as sent.</div>`;
-  const htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferContactName(originalRecipient));
+  let htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferContactName(originalRecipient));
   const campaignSender = await senderForMail(mail);
   const campaignReplyToEmail = await replyToForMail(mail);
+  const unsubscribeHeaders: Record<string, string> = {};
+  if (baseUrl && originalContactId && originalRecipient && originalRecipient !== "unknown") {
+    const unsubscribeUrl = `${baseUrl}/api/unsubscribe?contact=${encodeURIComponent(originalContactId)}&email=${encodeURIComponent(originalRecipient)}`;
+    unsubscribeHeaders["List-Unsubscribe"] = `<mailto:${campaignReplyToEmail}?subject=unsubscribe>, <${unsubscribeUrl}>`;
+    unsubscribeHeaders["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+    htmlContent += `<p style="font-family:Calibri,Arial,sans-serif;font-size:9pt;color:#8993a0;margin-top:24px">Don't want to hear from us again? <a href="${unsubscribeUrl}" style="color:#8993a0">Unsubscribe</a>.</p>`;
+  }
   const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": process.env.BREVO_API_KEY || "", "Content-Type": "application/json" },
@@ -3079,6 +3281,7 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
       to: [{ email: testRecipient, name: "IKF Test Recipient" }],
       subject: `[TEST PREVIEW] ${mail.subject}`,
       htmlContent: `${previewBanner}${htmlContent}`,
+      ...(Object.keys(unsubscribeHeaders).length ? { headers: unsubscribeHeaders } : {}),
       tags: ["ikf-reach", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });

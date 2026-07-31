@@ -5,11 +5,12 @@ import data from "./dashboard-data.json";
 import StatisticsDashboard from "./statistics-dashboard";
 import RichEmailEditor from "./rich-email-editor";
 import { inferContactName } from "./lib/name";
+import { buildCampaignSchedule } from "./lib/schedule";
 
 type Section = "overview" | "create" | "campaigns" | "statistics" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
 type CampaignWorkspaceView = "overview" | "emails" | "delivery";
-type EmailRecord = { id: string; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
-type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null };
+type EmailRecord = { id: string; contactId?: string | null; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
+type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null; unsubscribed?: boolean };
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
@@ -143,6 +144,12 @@ function personalizeGreeting(html: string, recipient: string, contacts: ContactR
   return name === "Sir/Madam" ? html : html.replace(/Dear\s+(?:Sir\/?Madam|Sir or Madam)/i, `Dear ${name}`);
 }
 
+function unsubscribeFooterHtml(email: EmailRecord) {
+  if (typeof window === "undefined" || !email.contactId || !email.recipient) return "";
+  const unsubscribeUrl = `${window.location.origin}/api/unsubscribe?contact=${encodeURIComponent(email.contactId)}&email=${encodeURIComponent(email.recipient)}`;
+  return `<p style="font-family:Calibri,Arial,sans-serif;font-size:9pt;color:#8993a0;margin-top:24px">Don't want to hear from us again? <a href="${unsubscribeUrl}" style="color:#8993a0">Unsubscribe</a>.</p>`;
+}
+
 function StatusPill({ value }: { value?: string | null }) {
   return <span className={`status-pill ${statusTone(value)}`}>{prettyStatus(value)}</span>;
 }
@@ -173,7 +180,7 @@ function Metric({ label, value, note, tone }: { label: string; value: number; no
   );
 }
 
-function EmailTable({ rows, onOpen, compact = false, selected, onSelect, onDelete, deletingDisabled = false }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean; selected?: Set<string>; onSelect?: (id: string, checked: boolean) => void; onDelete?: (email: EmailRecord) => void; deletingDisabled?: boolean }) {
+function EmailTable({ rows, onOpen, compact = false, selected, onSelect, onDelete, deletingDisabled = false, unsubscribedEmails }: { rows: EmailRecord[]; onOpen: (email: EmailRecord) => void; compact?: boolean; selected?: Set<string>; onSelect?: (id: string, checked: boolean) => void; onDelete?: (email: EmailRecord) => void; deletingDisabled?: boolean; unsubscribedEmails?: Set<string> }) {
   const selectable = Boolean(selected && onSelect);
   const allSelected = selectable && rows.length > 0 && rows.every((email) => selected!.has(email.id));
   return (
@@ -199,7 +206,7 @@ function EmailTable({ rows, onOpen, compact = false, selected, onSelect, onDelet
                 <span>{email.recipient}</span>
               </td>
               <td className="subject-cell">{email.subject}</td>
-              <td><StatusPill value={email.sendStatus || email.status} /></td>
+              <td><StatusPill value={email.sendStatus || email.status} />{unsubscribedEmails?.has(email.recipient.trim().toLowerCase()) && <span className="validation-pill invalid">Unsubscribed</span>}</td>
               {!compact && <td>{email.campaign}</td>}
               <td>{compactDate(email.generatedAt)}</td>
               {onDelete && <td onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><button type="button" className="delete-email-action" disabled={deletingDisabled || email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")} onClick={() => onDelete(email)} title={email.status === "sent" || email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled") ? "Sent or scheduled emails cannot be deleted" : "Delete this generated email"}>Delete</button></td>}
@@ -235,12 +242,14 @@ export default function Home() {
   const [contactPage, setContactPage] = useState(1);
   const [companyPage, setCompanyPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
+  const [previewTestEmail, setPreviewTestEmail] = useState("");
   const [selectedContact, setSelectedContact] = useState<ContactRecord | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<CompanyRecord | null>(null);
   const [editingCompany, setEditingCompany] = useState<CompanyRecord | null>(null);
   const [contactForm, setContactForm] = useState({ name: "", email: "", role: "", company: "", industry: "", website: "", country: "" });
   const [companyForm, setCompanyForm] = useState({ name: "", industry: "", website: "", country: "" });
   const [control, setControl] = useState<ControlData | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void } | null>(null);
   const [working, setWorking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState("");
@@ -296,8 +305,13 @@ export default function Home() {
   const scanCancelRef = useRef(false);
   const [savingDiscoveredContacts, setSavingDiscoveredContacts] = useState(false);
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", batchSize: 1, delayMinutes: 5, confirmed: false });
+  const [batchSizeCustom, setBatchSizeCustom] = useState(false);
+  const [delayMinutesCustom, setDelayMinutesCustom] = useState(false);
   const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send">("schedule");
   const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
+  const [sendCampaignProgress, setSendCampaignProgress] = useState<{ sent: number; total: number; failed: number } | null>(null);
+  const [sendCampaignWaitNote, setSendCampaignWaitNote] = useState<string | null>(null);
+  const sendCampaignCancelRef = useRef(false);
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
   const [campaignWorkspaceView, setCampaignWorkspaceView] = useState<CampaignWorkspaceView>("overview");
   const [campaignDetailOpen, setCampaignDetailOpen] = useState(false);
@@ -311,8 +325,10 @@ export default function Home() {
   const [activityFilter, setActivityFilter] = useState("all");
   const [settingsView, setSettingsView] = useState<"connections" | "workflow" | "delivery">("connections");
   const [accessBannerExpanded, setAccessBannerExpanded] = useState(false);
+  const [accessKeyInput, setAccessKeyInput] = useState("");
+  const [accessKeyError, setAccessKeyError] = useState("");
   const [validationData, setValidationData] = useState<ValidationData | null>(null);
-  const [validationFilter, setValidationFilter] = useState<"all" | ValidationVerdict | "unchecked">("all");
+  const [validationFilter, setValidationFilter] = useState<"all" | ValidationVerdict | "unchecked" | "unsubscribed">("all");
   const [validationPanelOpen, setValidationPanelOpen] = useState(false);
   const [validationScheduleMode, setValidationScheduleMode] = useState<"now" | "schedule">("now");
   const [validationScheduledFor, setValidationScheduledFor] = useState("");
@@ -322,10 +338,17 @@ export default function Home() {
   const validationKickoffsRef = useRef(new Map<string, number>());
   const pageSize = 20;
 
+  function apiFetch(url: string, init: RequestInit = {}) {
+    const headers = new Headers(init.headers || {});
+    const key = typeof window !== "undefined" ? window.localStorage.getItem("ikf_access_key") : "";
+    if (key) headers.set("x-ikf-access-key", key);
+    return fetch(url, { ...init, headers });
+  }
+
   async function loadControl() {
     setRefreshing(true);
     try {
-      const response = await fetch("/api/control");
+      const response = await apiFetch("/api/control");
       const result = await response.json();
       setControl(result);
     } catch {
@@ -335,9 +358,39 @@ export default function Home() {
     }
   }
 
+  async function loadBackgroundJobsOnly() {
+    try {
+      const response = await apiFetch("/api/control?jobsOnly=1");
+      const result = await response.json();
+      if (!result.ok) return;
+      setControl((current) => (current ? { ...current, jobs: result.jobs } : current));
+    } catch {
+      // Transient polling failure — the next 3s tick tries again, no need to surface an error.
+    }
+  }
+
+  async function unlockWithAccessKey() {
+    const key = accessKeyInput.trim();
+    if (!key) return;
+    window.localStorage.setItem("ikf_access_key", key);
+    setAccessKeyError("");
+    try {
+      const response = await apiFetch("/api/control");
+      const result = await response.json();
+      setControl(result);
+      if (result.canManage) setAccessKeyInput("");
+      else {
+        setAccessKeyError("That access key was not accepted.");
+        window.localStorage.removeItem("ikf_access_key");
+      }
+    } catch {
+      setAccessKeyError("Could not reach the server to verify the key.");
+    }
+  }
+
   async function loadValidation() {
     try {
-      const response = await fetch("/api/email-validation");
+      const response = await apiFetch("/api/email-validation");
       setValidationData(await response.json());
     } catch {
       setValidationData({ ok: false, error: "Unable to load email validation status." });
@@ -360,7 +413,10 @@ export default function Home() {
   useEffect(() => {
     const active = (control?.jobs || []).some((job) => ["queued", "researching"].includes(String(job.status)));
     if (!active) return;
-    const timer = window.setInterval(loadControl, 3000);
+    // Poll job progress only (cheap D1 query), not the full dashboard refetch that /api/control
+    // otherwise does — that refetch reads whole contact/company/email tables and got expensive
+    // once those grew past a few thousand rows, which made frequent polling starve the server.
+    const timer = window.setInterval(loadBackgroundJobsOnly, 3_000);
     return () => window.clearInterval(timer);
   }, [control?.jobs]);
 
@@ -431,7 +487,7 @@ export default function Home() {
     setWorking(true);
     setNotice("");
     try {
-      const response = await fetch("/api/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const response = await apiFetch("/api/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || "Action could not be completed.");
       setNoticeTone("success");
@@ -471,7 +527,7 @@ export default function Home() {
         }
         scheduledFor = scheduledDate.toISOString();
       }
-      const response = await fetch("/api/email-validation", {
+      const response = await apiFetch("/api/email-validation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "queue", scheduledFor, contactIds }),
@@ -504,7 +560,7 @@ export default function Home() {
   async function cancelEmailValidation(jobId: string) {
     setWorking(true);
     try {
-      const response = await fetch("/api/email-validation", {
+      const response = await apiFetch("/api/email-validation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "cancel", jobId }),
@@ -534,16 +590,21 @@ export default function Home() {
     () => new Map((validationData?.results || []).map((result) => [result.contactId, result])),
     [validationData?.results],
   );
+  const unsubscribedEmails = useMemo(
+    () => new Set(displayContacts.filter((contact) => contact.unsubscribed).map((contact) => contact.email.trim().toLowerCase())),
+    [displayContacts],
+  );
   const activeValidationJob = useMemo(
     () => (validationData?.jobs || []).find((job) => ["scheduled", "queued", "running"].includes(job.status)),
     [validationData?.jobs],
   );
   const validationCounts = useMemo(() => {
-    const counts = { all: displayContacts.length, valid: 0, risky: 0, invalid: 0, unknown: 0, unchecked: 0 };
+    const counts = { all: displayContacts.length, valid: 0, risky: 0, invalid: 0, unknown: 0, unchecked: 0, unsubscribed: 0 };
     for (const contact of displayContacts) {
       const verdict = validationByContact.get(contact.id)?.verdict;
       if (verdict) counts[verdict] += 1;
       else counts.unchecked += 1;
+      if (contact.unsubscribed) counts.unsubscribed += 1;
     }
     return counts;
   }, [displayContacts, validationByContact]);
@@ -553,7 +614,8 @@ export default function Home() {
       const matchesIndustry = contactIndustry === "all" || (contact.industry || "") === contactIndustry;
       const verdict = validationByContact.get(contact.id)?.verdict;
       const matchesValidation = validationFilter === "all"
-        || (validationFilter === "unchecked" ? !verdict : verdict === validationFilter);
+        || (validationFilter === "unsubscribed" ? Boolean(contact.unsubscribed)
+          : validationFilter === "unchecked" ? !verdict : verdict === validationFilter);
       return matchesIndustry && matchesValidation && (!term || `${contactDisplayName(contact)} ${contact.email} ${contact.company} ${contact.industry || ""}`.toLowerCase().includes(term));
     });
   }, [displayContacts, search, contactIndustry, validationByContact, validationFilter]);
@@ -630,8 +692,32 @@ export default function Home() {
   })) : data.campaigns.map((campaign) => ({ ...campaign, id: campaign.name })), [control?.campaigns, control?.sender, displayEmails, paused]);
   const selectedCampaign = displayCampaigns.find((campaign) => campaign.id === queueForm.campaignId) || displayCampaigns[0];
   const selectedCampaignEmails = selectedCampaign ? displayEmails.filter((email) => email.campaign === selectedCampaign.name) : [];
-  const selectedCampaignDrafts = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review").length;
+  // Contacts with a permanently invalid verdict (bad domain, no MX records, etc.) can never pass
+  // approval — the server will keep rejecting them. Don't let one unfixable recipient deadlock the
+  // whole campaign's approve/schedule/send buttons; the server already skips them at delivery time.
+  const selectedCampaignPendingReview = selectedCampaignEmails.filter((email) => email.status === "draft_pending_review");
+  const selectedCampaignQuarantined = selectedCampaignPendingReview.filter((email) => email.contactId && validationByContact.get(email.contactId)?.verdict === "invalid").length;
+  const selectedCampaignDrafts = selectedCampaignPendingReview.length - selectedCampaignQuarantined;
   const selectedCampaignApproved = selectedCampaignEmails.filter((email) => email.status === "approved").length;
+  // Live preview of when this campaign will finish sending under the current batch size /
+  // gap / start time — reuses the exact same algorithm the server uses to actually schedule it,
+  // so this is a real calculation, not a rough guess.
+  const campaignSchedulePreview = useMemo(() => {
+    if (!queueForm.scheduledFor || selectedCampaignApproved <= 0) return null;
+    const start = new Date(queueForm.scheduledFor);
+    if (!Number.isFinite(start.getTime())) return null;
+    try {
+      const times = buildCampaignSchedule(start, selectedCampaignApproved, queueForm.batchSize, effectiveCampaignGap, control?.settings || {});
+      const finishAt = times.at(-1);
+      if (!finishAt) return null;
+      const dayFormatter = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" });
+      const spanDays = new Set(times.map((time) => dayFormatter.format(time))).size;
+      const totalBatches = Math.ceil(selectedCampaignApproved / Math.max(1, Math.min(selectedCampaignApproved, queueForm.batchSize)));
+      return { finishAt, spanDays, totalBatches, error: null as string | null };
+    } catch (error) {
+      return { finishAt: null as Date | null, spanDays: 0, totalBatches: 0, error: error instanceof Error ? error.message : "Unable to calculate this schedule." };
+    }
+  }, [queueForm.scheduledFor, queueForm.batchSize, effectiveCampaignGap, selectedCampaignApproved, control?.settings]);
   const selectedCampaignScheduled = selectedCampaignEmails.filter((email) => email.status === "scheduled" || String(email.sendStatus || "").startsWith("scheduled")).length;
   const selectedCampaignSent = selectedCampaignEmails.filter((email) => email.status === "sent" || email.sendStatus === "sent").length;
   const selectedCampaignEmailRecords = selectedCampaignEmails.filter((email) => selectedIds.has(email.id));
@@ -783,6 +869,10 @@ export default function Home() {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [selectedEmail, selectedContact, selectedCompany, editingCompany]);
 
+  useEffect(() => {
+    setPreviewTestEmail("");
+  }, [selectedEmail?.id]);
+
   function switchSection(next: Section) {
     setSection(next);
     if (next === "campaigns") setCampaignDetailOpen(false);
@@ -862,12 +952,35 @@ export default function Home() {
     }
   }
 
-  async function stopBackgroundJob(job: BackgroundJob) {
-    if (!window.confirm(`Stop background research for “${job.campaignName}”? Completed contacts and drafts will be kept, but unprocessed sources will be cancelled.`)) return;
-    await runAction(
-      { action: "cancel_background_campaign", jobId: job.id },
-      `Background research for ${job.campaignName} was stopped. Completed work was preserved.`,
-    );
+  async function sendPreviewTestCopy() {
+    if (!selectedEmail) return;
+    const testRecipient = previewTestEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testRecipient)) {
+      setNoticeTone("error");
+      setNotice("Enter a valid email address to receive the test copy.");
+      return;
+    }
+    const result = await runAction({
+      action: "send_test",
+      emailIds: [selectedEmail.id],
+      testRecipients: testRecipient,
+      confirm: true,
+    }, `Test copy sent to ${testRecipient}. The original recipient and draft status were not changed.`);
+    if (result?.ok) setPreviewTestEmail("");
+  }
+
+  function stopBackgroundJob(job: BackgroundJob) {
+    setConfirmDialog({
+      message: `Stop background research for "${job.campaignName}"? Completed contacts and drafts will be kept, but unprocessed sources will be cancelled.`,
+      confirmLabel: "Stop research",
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        await runAction(
+          { action: "cancel_background_campaign", jobId: job.id },
+          `Background research for ${job.campaignName} was stopped. Completed work was preserved.`,
+        );
+      },
+    });
   }
 
   async function approveSelectedCampaign() {
@@ -895,12 +1008,18 @@ export default function Home() {
         setNotice("Every draft in this campaign is already approved or scheduled.");
         return;
       }
-      if (!window.confirm(`Approve all ${pendingCount} draft emails in “${selectedCampaign.name}”?\n\nThis only changes approval status. It will not send or schedule any email.`)) return;
-      const result = await runAction(
-        { action: "approve_campaign", campaignId: selectedCampaign.id },
-        `${pendingCount} campaign drafts approved. Nothing has been sent.`,
-      );
-      if (result?.ok) setSelectedIds(new Set());
+      setConfirmDialog({
+        message: `Approve all ${pendingCount} draft emails in "${selectedCampaign.name}"? This only changes approval status. It will not send or schedule any email.`,
+        confirmLabel: "Approve all",
+        onConfirm: async () => {
+          setConfirmDialog(null);
+          const result = await runAction(
+            { action: "approve_campaign", campaignId: selectedCampaign.id },
+            `${pendingCount} campaign drafts approved. Nothing has been sent.`,
+          );
+          if (result?.ok) setSelectedIds(new Set());
+        },
+      });
       return;
     }
     await runAction(
@@ -915,19 +1034,26 @@ export default function Home() {
       setNotice("Sent or scheduled emails cannot be deleted. Cancel a scheduled delivery first.");
       return;
     }
-    if (!window.confirm(`Delete the generated email for ${email.recipient} from this campaign?\n\nThe contact and company will remain in the database.`)) return;
-    const result = await runAction(
-      { action: "delete_generated_email", emailId: email.id },
-      `The generated email for ${email.recipient} was deleted. Its contact and company were kept.`,
-    );
-    if (result) {
-      setSelectedIds((current) => {
-        const next = new Set(current);
-        next.delete(email.id);
-        return next;
-      });
-      if (selectedEmail?.id === email.id) setSelectedEmail(null);
-    }
+    setConfirmDialog({
+      message: `Delete the generated email for ${email.recipient} from this campaign? The contact and company will remain in the database.`,
+      confirmLabel: "Delete email",
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        const result = await runAction(
+          { action: "delete_generated_email", emailId: email.id },
+          `The generated email for ${email.recipient} was deleted. Its contact and company were kept.`,
+        );
+        if (result) {
+          setSelectedIds((current) => {
+            const next = new Set(current);
+            next.delete(email.id);
+            return next;
+          });
+          if (selectedEmail?.id === email.id) setSelectedEmail(null);
+        }
+      },
+    });
   }
 
   async function deleteSelectedCampaign() {
@@ -985,17 +1111,83 @@ export default function Home() {
     }
   }
 
+  async function fetchSendCampaignBatchWithRetry(payload: Record<string, unknown>, attempts = 3) {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60_000);
+      if (attempt > 1) setSendCampaignWaitNote(`No response yet — retrying (attempt ${attempt} of ${attempts})…`);
+      else setSendCampaignWaitNote(null);
+      try {
+        const response = await apiFetch("/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || "The campaign could not be sent.");
+        setSendCampaignWaitNote(null);
+        return result;
+      } catch (error) {
+        clearTimeout(timeoutId);
+        lastError = error;
+        if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("The campaign could not be sent.");
+  }
+
+  function stopSendCampaignNow() {
+    sendCampaignCancelRef.current = true;
+  }
+
   async function sendSelectedCampaignNow() {
     if (!selectedCampaign) return;
-    const result = await runAction({
-      action: "send_campaign",
-      campaignId: selectedCampaign.id,
-      confirmText: campaignSendConfirm,
-    }, `${selectedCampaign.name} was submitted to Brevo for immediate delivery.`);
-    if (result?.ok) {
+    sendCampaignCancelRef.current = false;
+    setWorking(true);
+    setNotice("");
+    setSendCampaignWaitNote(null);
+    setSendCampaignProgress({ sent: 0, total: 0, failed: 0 });
+    let totalSent = 0;
+    let totalFailed = 0;
+    let totalSkipped = 0;
+    let skippedDetails: Array<{ email: string; reason: string }> = [];
+    let campaignTotal: number | null = null;
+    let networkPaused = false;
+    try {
+      while (!sendCampaignCancelRef.current) {
+        let result: any;
+        try {
+          result = await fetchSendCampaignBatchWithRetry({
+            action: "send_campaign",
+            campaignId: selectedCampaign.id,
+            confirmText: campaignSendConfirm,
+            batchLimit: 40,
+          });
+        } catch {
+          networkPaused = true;
+          break;
+        }
+        if (campaignTotal === null) campaignTotal = Math.max(0, (result.totalApproved || 0) - (result.skipped || 0));
+        totalSent += result.sent || 0;
+        totalFailed += result.failed || 0;
+        totalSkipped = result.skipped ?? totalSkipped;
+        skippedDetails = result.skippedDetails || skippedDetails;
+        setSendCampaignProgress({ sent: totalSent + totalFailed, total: campaignTotal, failed: totalFailed });
+        await loadControl();
+        if (!result.remaining) break;
+      }
       setCampaignSendConfirm("");
-      setNoticeTone(result.failed ? "error" : "success");
-      setNotice(`${result.sent} campaign emails were accepted by Brevo${result.failed ? `; ${result.failed} need attention` : ""}.`);
+      const stoppedEarly = sendCampaignCancelRef.current;
+      const label = networkPaused ? "Paused after a network issue." : stoppedEarly ? "Stopped early." : "Done.";
+      setNoticeTone(totalFailed || networkPaused ? "error" : "success");
+      setNotice(`${label} ${totalSent} campaign email${totalSent === 1 ? "" : "s"} accepted by Brevo${totalFailed ? `; ${totalFailed} need attention` : ""}${totalSkipped ? `; ${totalSkipped} quarantined and skipped (${skippedDetails.slice(0, 2).map((d) => d.email).join(", ")}${skippedDetails.length > 2 ? "…" : ""})` : ""}.${networkPaused ? ' Click "Send campaign now" again to resume — nothing already sent will be repeated.' : ""}`);
+    } finally {
+      setWorking(false);
+      setSendCampaignProgress(null);
+      setSendCampaignWaitNote(null);
     }
   }
 
@@ -1011,7 +1203,7 @@ export default function Home() {
       if (attempt > 1) setScanWaitNote(`No response yet — retrying (attempt ${attempt} of ${attempts})…`);
       else setScanWaitNote(null);
       try {
-        const response = await fetch("/api/control", {
+        const response = await apiFetch("/api/control", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1140,7 +1332,7 @@ export default function Home() {
   }
 
   async function persistDiscoveredContacts(scans: WebsiteScanRecord[]) {
-    const response = await fetch("/api/control", {
+    const response = await apiFetch("/api/control", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1363,8 +1555,21 @@ export default function Home() {
           )}
           {control?.ok && !control.canManage && (
             <section className={`access-banner compact-access-banner ${accessBannerExpanded ? "expanded" : ""}`}>
-              <div><strong>Public view · sending is locked</strong>{accessBannerExpanded && <p>Sign in with an authorized IKF account to approve, schedule, cancel, or send emails.</p>}</div>
-              <div className="access-banner-actions"><button type="button" onClick={() => setAccessBannerExpanded((value) => !value)}>{accessBannerExpanded ? "Less" : "Why?"}</button><a href="/signin-with-chatgpt?return_to=%2F">Sign in</a></div>
+              <div><strong>Public view · sending is locked</strong>{accessBannerExpanded && <p>Sign in with an authorized IKF account, or enter the team access key, to approve, schedule, cancel, or send emails.</p>}</div>
+              <div className="access-banner-actions">
+                <button type="button" onClick={() => setAccessBannerExpanded((value) => !value)}>{accessBannerExpanded ? "Less" : "Why?"}</button>
+                <input
+                  type="password"
+                  value={accessKeyInput}
+                  onChange={(event) => { setAccessKeyInput(event.target.value); setAccessKeyError(""); }}
+                  onKeyDown={(event) => event.key === "Enter" && unlockWithAccessKey()}
+                  placeholder="Team access key"
+                  aria-label="Team access key"
+                />
+                <button type="button" onClick={unlockWithAccessKey} disabled={!accessKeyInput.trim()}>Unlock</button>
+                <a href="/signin-with-chatgpt?return_to=%2F">Sign in</a>
+              </div>
+              {accessKeyError && <p className="access-banner-error">{accessKeyError}</p>}
             </section>
           )}
           {section === "overview" && (
@@ -1421,7 +1626,7 @@ export default function Home() {
 
               <section className="panel recent-panel">
                 <div className="panel-heading"><div><p className="eyebrow">Latest output</p><h2>Recently generated emails</h2></div><button className="text-button" onClick={() => openCampaignWorkspace("overview")}>Open campaigns →</button></div>
-                <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact />
+                <EmailTable rows={displayEmails.slice(0, 7)} onOpen={setSelectedEmail} compact unsubscribedEmails={unsubscribedEmails} />
               </section>
             </>
           )}
@@ -1693,7 +1898,7 @@ export default function Home() {
                       <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
                     </div>
                   )}
-                  <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} onDelete={deleteCampaignEmail} deletingDisabled={working || !control?.canManage} />
+                  <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} onDelete={deleteCampaignEmail} deletingDisabled={working || !control?.canManage} unsubscribedEmails={unsubscribedEmails} />
                   <div className="pagination"><span>Page {page} of {campaignEmailPages}</span><div><button disabled={page === 1} onClick={() => setPage((current) => current - 1)}>Previous</button><button disabled={page === campaignEmailPages} onClick={() => setPage((current) => current + 1)}>Next</button></div></div>
                 </section>
               )}
@@ -1715,7 +1920,7 @@ export default function Home() {
                       </section>
                       <section>
                         <div className="campaign-step-heading"><span>2</span><div><strong>Approve the campaign</strong><p>Approval changes draft status only. It never sends an email.</p></div></div>
-                        <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span></div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
+                        <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span>{selectedCampaignQuarantined > 0 && <small>{selectedCampaignQuarantined} more {selectedCampaignQuarantined === 1 ? "is" : "are"} permanently quarantined (invalid email) — excluded from this count and skipped automatically at delivery.</small>}</div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
                       </section>
                       <section className="campaign-schedule-section">
                         <div className="campaign-step-heading"><span>3</span><div><strong>Choose campaign delivery</strong><p>Sending identity: {selectedCampaign.senderName} &lt;{selectedCampaign.senderEmail}&gt;. Choose immediate or scheduled Brevo delivery.</p></div></div>
@@ -1726,16 +1931,78 @@ export default function Home() {
                         {campaignDeliveryChoice === "schedule" ? (
                           <div className="campaign-schedule-form">
                             <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
-                            <label><span>Emails in each batch</span><select value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Number(event.target.value) })}><option value={1}>1 email at a time</option><option value={2}>2 emails at a time</option><option value={3}>3 emails at a time</option></select><small>Emails in one batch are submitted together.</small></label>
-                            <label><span>Gap between batches</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={3}>3 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. The global minimum and sending hours always apply.</small></label>
+                            <label>
+                              <span>Emails in each batch</span>
+                              <select
+                                value={batchSizeCustom ? "custom" : queueForm.batchSize}
+                                onChange={(event) => {
+                                  if (event.target.value === "custom") { setBatchSizeCustom(true); return; }
+                                  setBatchSizeCustom(false);
+                                  setQueueForm({ ...queueForm, batchSize: Number(event.target.value) });
+                                }}
+                              >
+                                <option value={1}>1 email at a time</option>
+                                <option value={2}>2 emails at a time</option>
+                                <option value={3}>3 emails at a time</option>
+                                <option value="custom">Custom…</option>
+                              </select>
+                              {batchSizeCustom && (
+                                <input type="number" min={1} max={Math.max(1, selectedCampaignApproved)} value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Math.max(1, Math.min(Math.max(1, selectedCampaignApproved), Number(event.target.value) || 1)) })} style={{ marginTop: 6 }} />
+                              )}
+                              <small>Emails in one batch are submitted together. Allowed range: 1-{Math.max(1, selectedCampaignApproved)} (all approved emails in this campaign).</small>
+                            </label>
+                            <label>
+                              <span>Gap between batches</span>
+                              <select
+                                value={delayMinutesCustom ? "custom" : queueForm.delayMinutes}
+                                onChange={(event) => {
+                                  if (event.target.value === "custom") { setDelayMinutesCustom(true); return; }
+                                  setDelayMinutesCustom(false);
+                                  setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) });
+                                }}
+                              >
+                                <option value={1}>1 minute</option>
+                                <option value={2}>2 minutes</option>
+                                <option value={3}>3 minutes</option>
+                                <option value={5}>5 minutes</option>
+                                <option value={10}>10 minutes</option>
+                                <option value={15}>15 minutes</option>
+                                <option value="custom">Custom…</option>
+                              </select>
+                              {delayMinutesCustom && (
+                                <input type="number" min={1} max={60} value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Math.max(1, Math.min(60, Number(event.target.value) || 1)) })} style={{ marginTop: 6 }} />
+                              )}
+                              <small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. Allowed range: 1-60. The global minimum and sending hours always apply.</small>
+                            </label>
+                            {campaignSchedulePreview && (
+                              <div className="campaign-schedule-preview">
+                                {campaignSchedulePreview.error ? (
+                                  <p className="campaign-schedule-preview-error">{campaignSchedulePreview.error}</p>
+                                ) : (
+                                  <p>With these settings, all <strong>{selectedCampaignApproved.toLocaleString("en-IN")}</strong> emails will finish sending around <strong>{campaignSchedulePreview.finishAt?.toLocaleString("en-IN")}</strong> — spanning {campaignSchedulePreview.spanDays} day{campaignSchedulePreview.spanDays === 1 ? "" : "s"} across {campaignSchedulePreview.totalBatches.toLocaleString("en-IN")} batch{campaignSchedulePreview.totalBatches === 1 ? "" : "es"}.</p>
+                                )}
+                              </div>
+                            )}
                             <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
                             <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
                           </div>
                         ) : (
                           <div className="campaign-send-now-form">
-                            <div><strong>Immediate delivery cannot be undone</strong><p>All {selectedCampaignApproved} approved, unsent emails in this campaign will be submitted to Brevo now. The daily limit and global Pause all control still apply.</p></div>
+                            <div><strong>Immediate delivery cannot be undone</strong><p>All {selectedCampaignApproved} approved, unsent emails in this campaign will be submitted to Brevo right now, one after another with no pacing — the daily limit no longer blocks this. Global Pause all still applies.</p></div>
                             <label><span>Type SEND CAMPAIGN to confirm</span><input value={campaignSendConfirm} onChange={(event) => setCampaignSendConfirm(event.target.value.toUpperCase())} placeholder="SEND CAMPAIGN" /></label>
-                            <button className="danger-action" disabled={working || paused || !control?.canManage || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0 || campaignSendConfirm !== "SEND CAMPAIGN"} onClick={sendSelectedCampaignNow}>{working ? "Submitting campaign…" : `Send ${selectedCampaignApproved} approved emails now`}</button>
+                            {working && sendCampaignProgress ? (
+                              <div className="scan-progress" role="status" aria-live="polite">
+                                <div className="scan-progress-row">
+                                  <span>Sending… {sendCampaignProgress.sent} of {sendCampaignProgress.total || "?"}{sendCampaignProgress.failed ? ` (${sendCampaignProgress.failed} failed)` : ""}</span>
+                                  <button type="button" className="scan-stop-button" onClick={stopSendCampaignNow}>Stop</button>
+                                </div>
+                                <i><b style={{ width: `${sendCampaignProgress.total ? Math.min(100, Math.round((sendCampaignProgress.sent / sendCampaignProgress.total) * 100)) : 0}%` }} /></i>
+                                {sendCampaignWaitNote && <small className="scan-progress-note scan-progress-warn">{sendCampaignWaitNote}</small>}
+                                <small className="scan-progress-note">Safe to leave running — click Stop and "Send campaign now" again later to resume where it left off.</small>
+                              </div>
+                            ) : (
+                              <button className="danger-action" disabled={working || paused || !control?.canManage || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0 || campaignSendConfirm !== "SEND CAMPAIGN"} onClick={sendSelectedCampaignNow}>{working ? "Starting…" : `Send ${selectedCampaignApproved} approved emails now`}</button>
+                            )}
                           </div>
                         )}
                       </section>
@@ -1801,7 +2068,7 @@ export default function Home() {
                   <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
                 </div>
               )}
-              <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} />
+              <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} unsubscribedEmails={unsubscribedEmails} />
               <div className="pagination"><span>Page {page} of {pages}</span><div><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div></div>
             </section>
           )}
@@ -2050,15 +2317,65 @@ export default function Home() {
 
                     <section>
                       <div className="campaign-step-heading"><span>2</span><div><strong>Approve the campaign</strong><p>Approval only changes draft status. It does not send or schedule anything.</p></div></div>
-                      <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span></div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
+                      <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span>{selectedCampaignQuarantined > 0 && <small>{selectedCampaignQuarantined} more {selectedCampaignQuarantined === 1 ? "is" : "are"} permanently quarantined (invalid email) — excluded from this count and skipped automatically at delivery.</small>}</div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
                     </section>
 
                     <section className="campaign-schedule-section">
                       <div className="campaign-step-heading"><span>3</span><div><strong>Schedule automatic delivery</strong><p>Brevo stores the schedule and sends while this dashboard and your computer are closed.</p></div></div>
                       <div className="campaign-schedule-form">
                         <label><span>Campaign starts</span><input type="datetime-local" value={queueForm.scheduledFor} onChange={(event) => setQueueForm({ ...queueForm, scheduledFor: event.target.value })} /><small>Choose a time from 2 minutes up to 72 hours ahead.</small></label>
-                        <label><span>Emails in each batch</span><select value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Number(event.target.value) })}><option value={1}>1 email at a time</option><option value={2}>2 emails at a time</option><option value={3}>3 emails at a time</option></select><small>Emails in one batch are submitted together.</small></label>
-                        <label><span>Gap between batches</span><select value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) })}><option value={1}>1 minute</option><option value={2}>2 minutes</option><option value={3}>3 minutes</option><option value={5}>5 minutes</option><option value={10}>10 minutes</option><option value={15}>15 minutes</option></select><small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. The global minimum and sending hours always apply.</small></label>
+                        <label>
+                          <span>Emails in each batch</span>
+                          <select
+                            value={batchSizeCustom ? "custom" : queueForm.batchSize}
+                            onChange={(event) => {
+                              if (event.target.value === "custom") { setBatchSizeCustom(true); return; }
+                              setBatchSizeCustom(false);
+                              setQueueForm({ ...queueForm, batchSize: Number(event.target.value) });
+                            }}
+                          >
+                            <option value={1}>1 email at a time</option>
+                            <option value={2}>2 emails at a time</option>
+                            <option value={3}>3 emails at a time</option>
+                            <option value="custom">Custom…</option>
+                          </select>
+                          {batchSizeCustom && (
+                            <input type="number" min={1} max={Math.max(1, selectedCampaignApproved)} value={queueForm.batchSize} onChange={(event) => setQueueForm({ ...queueForm, batchSize: Math.max(1, Math.min(Math.max(1, selectedCampaignApproved), Number(event.target.value) || 1)) })} style={{ marginTop: 6 }} />
+                          )}
+                          <small>Emails in one batch are submitted together. Allowed range: 1-{Math.max(1, selectedCampaignApproved)} (all approved emails in this campaign).</small>
+                        </label>
+                        <label>
+                          <span>Gap between batches</span>
+                          <select
+                            value={delayMinutesCustom ? "custom" : queueForm.delayMinutes}
+                            onChange={(event) => {
+                              if (event.target.value === "custom") { setDelayMinutesCustom(true); return; }
+                              setDelayMinutesCustom(false);
+                              setQueueForm({ ...queueForm, delayMinutes: Number(event.target.value) });
+                            }}
+                          >
+                            <option value={1}>1 minute</option>
+                            <option value={2}>2 minutes</option>
+                            <option value={3}>3 minutes</option>
+                            <option value={5}>5 minutes</option>
+                            <option value={10}>10 minutes</option>
+                            <option value={15}>15 minutes</option>
+                            <option value="custom">Custom…</option>
+                          </select>
+                          {delayMinutesCustom && (
+                            <input type="number" min={1} max={60} value={queueForm.delayMinutes} onChange={(event) => setQueueForm({ ...queueForm, delayMinutes: Math.max(1, Math.min(60, Number(event.target.value) || 1)) })} style={{ marginTop: 6 }} />
+                          )}
+                          <small>Effective gap: {effectiveCampaignGap} minute{effectiveCampaignGap === 1 ? "" : "s"}. Allowed range: 1-60. The global minimum and sending hours always apply.</small>
+                        </label>
+                        {campaignSchedulePreview && (
+                          <div className="campaign-schedule-preview">
+                            {campaignSchedulePreview.error ? (
+                              <p className="campaign-schedule-preview-error">{campaignSchedulePreview.error}</p>
+                            ) : (
+                              <p>With these settings, all <strong>{selectedCampaignApproved.toLocaleString("en-IN")}</strong> emails will finish sending around <strong>{campaignSchedulePreview.finishAt?.toLocaleString("en-IN")}</strong> — spanning {campaignSchedulePreview.spanDays} day{campaignSchedulePreview.spanDays === 1 ? "" : "s"} across {campaignSchedulePreview.totalBatches.toLocaleString("en-IN")} batch{campaignSchedulePreview.totalBatches === 1 ? "" : "es"}.</p>
+                            )}
+                          </div>
+                        )}
                         <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is currently active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery even after this dashboard is closed."}</small></span></label>
                         <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
                       </div>
@@ -2141,6 +2458,7 @@ export default function Home() {
                   ["invalid", "Quarantined", validationCounts.invalid],
                   ["unknown", "Unknown", validationCounts.unknown],
                   ["unchecked", "Not checked", validationCounts.unchecked],
+                  ["unsubscribed", "Unsubscribed", validationCounts.unsubscribed],
                 ] as const).map(([value, label, count]) => (
                   <button type="button" role="tab" aria-selected={validationFilter === value} className={validationFilter === value ? "active" : ""} key={value} onClick={() => { setValidationFilter(value); setContactPage(1); }}>
                     {label}<b>{count.toLocaleString("en-IN")}</b>
@@ -2192,14 +2510,14 @@ export default function Home() {
               <div className="table-wrap contacts-table-wrap"><table className="contacts-table"><thead><tr><th className="contact-select-cell"><input type="checkbox" checked={pageContactsSelected} onChange={togglePageContactSelection} aria-label={pageContactsSelected ? "Clear contacts on this page" : "Select contacts on this page"} /></th><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
-                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td className="contact-select-cell"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /></td><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
+                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td className="contact-select-cell"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /></td><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{contact.unsubscribed && <span className="validation-pill invalid">Unsubscribed</span>}{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
                 })}
               </tbody></table></div>
               <div className="contact-card-list">
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
                   return <article key={`mobile-${contact.id}`} className={validation?.verdict === "invalid" ? "contact-mobile-card quarantined-row" : "contact-mobile-card"}>
-                    <div className="contact-mobile-heading"><label className="mobile-contact-select"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /><span /></label><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} /></div>
+                    <div className="contact-mobile-heading"><label className="mobile-contact-select"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /><span /></label><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} />{contact.unsubscribed && <span className="validation-pill invalid">Unsubscribed</span>}</div>
                     <dl><div><dt>Company</dt><dd>{contact.company}</dd></div><div><dt>Industry</dt><dd>{contact.industry || "Not classified"}</dd></div><div><dt>Confidence</dt><dd><StatusPill value={contact.confidence} /></dd></div></dl>
                     {validation?.reasons?.[0] && <p className="validation-reason">{validation.reasons[0]}</p>}
                     <button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)}>Edit contact</button>
@@ -2251,8 +2569,28 @@ export default function Home() {
         <div className="drawer-backdrop" onMouseDown={() => setSelectedEmail(null)}>
           <aside className="email-drawer" onMouseDown={(event) => event.stopPropagation()} aria-label="Email preview" role="dialog" aria-modal="true">
             <div className="drawer-header"><div><p className="eyebrow">Email preview</p><h2>{selectedEmail.company}</h2></div><button type="button" onClick={() => setSelectedEmail(null)} aria-label="Close email preview">×</button></div>
-            <div className="email-meta"><div><span>To</span><strong>{selectedEmail.recipient}</strong></div><div><span>Subject</span><strong>{selectedEmail.subject}</strong></div><div><span>Campaign</span><strong>{selectedEmail.campaign}</strong></div><div><span>Status</span><StatusPill value={selectedEmail.sendStatus || selectedEmail.status} /></div></div>
-            <iframe title={`Preview of ${selectedEmail.subject}`} sandbox="" srcDoc={`<style>body{font-family:Calibri,Arial,sans-serif;color:#25262b;line-height:1.55;padding:24px;font-size:11pt}a{color:#4d3dc4}li{margin:7px 0}</style>${personalizeGreeting(selectedEmail.html, selectedEmail.recipient, displayContacts)}`} />
+            <div className="email-meta"><div><span>To</span><strong>{selectedEmail.recipient}</strong></div><div><span>Subject</span><strong>{selectedEmail.subject}</strong></div><div><span>Campaign</span><strong>{selectedEmail.campaign}</strong></div><div><span>Status</span><StatusPill value={selectedEmail.sendStatus || selectedEmail.status} />{unsubscribedEmails.has(selectedEmail.recipient.trim().toLowerCase()) && <span className="validation-pill invalid">Unsubscribed</span>}</div></div>
+            <iframe title={`Preview of ${selectedEmail.subject}`} sandbox="" srcDoc={`<style>body{font-family:Calibri,Arial,sans-serif;color:#25262b;line-height:1.55;padding:24px;font-size:11pt}a{color:#4d3dc4}li{margin:7px 0}</style>${personalizeGreeting(selectedEmail.html, selectedEmail.recipient, displayContacts)}${unsubscribeFooterHtml(selectedEmail)}`} />
+            <div className="preview-test-send">
+              <input
+                type="email"
+                value={previewTestEmail}
+                onChange={(event) => setPreviewTestEmail(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && sendPreviewTestCopy()}
+                placeholder="Your email address"
+                aria-label="Send a test copy to this address"
+                disabled={!control?.canManage || working}
+              />
+              <button
+                type="button"
+                className="test-send-action"
+                disabled={!control?.canManage || working || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(previewTestEmail.trim())}
+                onClick={sendPreviewTestCopy}
+              >
+                {working ? "Sending…" : "Send test copy to myself"}
+              </button>
+              <small>Only this inbox receives it. The original recipient and draft status stay unchanged.</small>
+            </div>
             <div className="drawer-footer"><span>Version {selectedEmail.version} · {compactDate(selectedEmail.generatedAt)}</span><button onClick={() => navigator.clipboard?.writeText(selectedEmail.subject)}>Copy subject</button></div>
           </aside>
         </div>
@@ -2325,6 +2663,17 @@ export default function Home() {
         {availableIndustries.map((industry) => <option value={industry} key={industry} />)}
       </datalist>
       {notice && <div className={`toast ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss notification">×</button></div>}
+      {confirmDialog && (
+        <div className="confirm-modal-backdrop" role="presentation" onClick={() => setConfirmDialog(null)}>
+          <div className="confirm-modal" role="alertdialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <p>{confirmDialog.message}</p>
+            <div className="confirm-modal-actions">
+              <button type="button" className="quiet-action" onClick={() => setConfirmDialog(null)}>Cancel</button>
+              <button type="button" className={confirmDialog.danger ? "danger-outline" : "primary-action"} onClick={confirmDialog.onConfirm}>{confirmDialog.confirmLabel}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

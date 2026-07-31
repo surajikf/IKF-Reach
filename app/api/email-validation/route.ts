@@ -18,12 +18,22 @@ const validationBatchSize = 100;
 const validationAttemptLimit = 3;
 const validationLeaseMs = 2 * 60_000;
 
+const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
+
 function actor(req: NextRequest) {
   return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
 }
 
-function canManage(_req: NextRequest) {
-  return true;
+function isLocalRequest(req: NextRequest) {
+  const host = (req.headers.get("host") || "").toLowerCase();
+  return host.includes("localhost") || host.includes("127.0.0.1");
+}
+
+function canManage(req: NextRequest) {
+  if (isLocalRequest(req)) return true;
+  if (allowedOperators.has(actor(req))) return true;
+  const accessKey = process.env.IKF_ACCESS_KEY || "";
+  return Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey;
 }
 
 function internalRequest(req: NextRequest, jobId: string) {
