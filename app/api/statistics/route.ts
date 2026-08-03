@@ -260,7 +260,7 @@ export async function GET(req: NextRequest) {
         ip: "",
         link: "",
         reason: "",
-        tag: "ikf-reach",
+        tag: "ikf-spark",
         source: "database",
       };
       addEvent(events, synthetic);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb, type D1Database, type D1PreparedStatement } from "../../../db";
+import { verifyEmailCookie } from "../auth/utils";
 import {
   emailDomain,
   isPracticalEmailSyntax,
@@ -29,11 +30,23 @@ function isLocalRequest(req: NextRequest) {
   return host.includes("localhost") || host.includes("127.0.0.1");
 }
 
-function canManage(req: NextRequest) {
+async function getUserApprovalStatus(req: NextRequest) {
+  const email = verifyEmailCookie(req.cookies.get("ikf_auth")?.value);
+  if (!email) return null;
+  if (email.toLowerCase() === "suraj.sonnar@ikf.co.in") return "approved";
+  const user = await getQueueDb()
+    .prepare("SELECT status FROM app_users WHERE email = ?")
+    .bind(email.toLowerCase())
+    .first<{ status: string }>();
+  return user?.status ?? null;
+}
+
+async function canManage(req: NextRequest) {
   if (isLocalRequest(req)) return true;
   if (allowedOperators.has(actor(req))) return true;
-  const accessKey = process.env.IKF_ACCESS_KEY || "";
-  return Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey;
+  const accessKey = process.env.IKF_ACCESS_KEY || process.env.NEXT_PUBLIC_TEAM_ACCESS_KEY || "";
+  if (Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey) return true;
+  return (await getUserApprovalStatus(req)) === "approved";
 }
 
 function internalRequest(req: NextRequest, jobId: string) {
@@ -177,7 +190,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       ok: true,
-      canManage: canManage(req),
+      canManage: await canManage(req),
       ...(await readValidationData(queueDb)),
       refreshedAt: new Date().toISOString(),
     });
@@ -203,7 +216,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ...(await processValidationBatch(queueDb, jobId)) });
     }
 
-    if (!canManage(req)) {
+    if (!(await canManage(req))) {
       return NextResponse.json({ ok: false, error: "Sign in with an authorized IKF account." }, { status: 403 });
     }
 

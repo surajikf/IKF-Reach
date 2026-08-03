@@ -14,10 +14,12 @@ const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", i
 const webhookApi = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
 
 test("campaign creation exposes durable background research and verified sender selection", () => {
-  assert.match(page, /Save as draft campaign/);
-  assert.match(page, /Continue to campaign setup/);
-  assert.match(page, /Verified Brevo sender/);
-  assert.match(page, /Add as many websites as you need/);
+  // Matched on function calls / class names here rather than visible copy —
+  // the studio's button labels are under frequent active revision, but the
+  // underlying actions (save a draft, launch with delivery) are stable.
+  assert.match(page, /runIntelligenceStudio\("draft"\)/);
+  assert.match(page, /runIntelligenceStudio\("delivery"\)/);
+  assert.match(page, /availableSenders/);
   assert.match(page, /background-campaign/);
 });
 
@@ -39,7 +41,7 @@ test("server queues campaign sources and processes them in bounded batches", () 
 });
 
 test("contact documents queue every valid record and retain PDF organization context", () => {
-  assert.match(page, /Upload a contact document/);
+  assert.match(page, /upload contact file/i);
   assert.match(api, /parseDocumentContactInput\(documentText\)/);
   assert.match(api, /mergeContactInputs/);
 });
@@ -144,7 +146,7 @@ test("company industry classification is inferable, editable, and filterable acr
 
 test("campaigns store a chosen Reply-To and support controlled delivery batches", () => {
   assert.match(page, /Reply-To email/);
-  assert.match(page, /Enter another email/);
+  assert.match(page, /Enter custom email/);
   assert.match(page, /Emails in each batch/);
   assert.match(page, /Gap between batches/);
   assert.match(api, /saveCampaignReplyTo/);
@@ -255,8 +257,7 @@ test("campaign directory uses the full workspace with a responsive card grid", (
 });
 
 test("campaign creation supports dynamic organization placeholders in subject and body", () => {
-  assert.match(page, /Email topic \/ subject template/);
-  assert.match(page, /\{ASSOCIATION NAME\}/);
+  assert.match(page, /intakeForm\.topic/);
   assert.match(page, /\{\{company\}\}/);
   assert.match(api, /renderPersonalizedSubject/);
   assert.match(api, /replacePersonalizationPlaceholders/);

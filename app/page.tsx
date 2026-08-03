@@ -129,12 +129,41 @@ function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
 
+function decodeHtmlEntities(str?: string | null): string {
+  if (!str) return "";
+  let s = String(str);
+  // Iterative decoding to handle double/triple encoded strings
+  for (let i = 0; i < 3; i++) {
+    const prev = s;
+    s = s
+      .replace(/&amp;#/g, "&#")
+      .replace(/&amp;quot;/g, '"')
+      .replace(/&amp;apos;/g, "'")
+      .replace(/&amp;lt;/g, "<")
+      .replace(/&amp;gt;/g, ">")
+      .replace(/&amp;amp;/g, "&")
+      .replace(/&#x2d;?/gi, "-")
+      .replace(/&#45;?/g, "-")
+      .replace(/&#039;?/g, "'")
+      .replace(/&#39;?/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&#34;?/g, '"')
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">");
+    if (s === prev) break;
+  }
+  return s.trim();
+}
+
 function shortName(name: string) {
-  return name.length > 43 ? `${name.slice(0, 43)}…` : name;
+  const clean = decodeHtmlEntities(name);
+  return clean.length > 43 ? `${clean.slice(0, 43)}…` : clean;
 }
 
 function contactDisplayName(contact: ContactRecord) {
-  return inferContactName(contact.email, contact.name);
+  return decodeHtmlEntities(inferContactName(contact.email, contact.name));
 }
 
 function personalizeGreeting(html: string, recipient: string, contacts: ContactRecord[]) {
@@ -274,6 +303,18 @@ export default function Home() {
     replyToEmail: "tanishka@iknowai.in",
   });
   const [currentStep, setCurrentStep] = useState(1);
+  const [sourceTab, setSourceTab] = useState<"raw" | "websites" | "file">("raw");
+  // Lazy initializer reads the saved preference synchronously on first
+  // render (client-only component), so the sidebar renders in its
+  // remembered state immediately instead of flashing expanded-then-collapsed
+  // the way an effect-driven read/re-render would.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem("ikf_sidebar_collapsed") === "1",
+  );
+
+  useEffect(() => {
+    window.localStorage.setItem("ikf_sidebar_collapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
 
   // Auto-save intakeForm to localStorage
   useEffect(() => {
@@ -321,9 +362,50 @@ export default function Home() {
   const [companyPageSize, setCompanyPageSize] = useState(18);
   const [contactIndustry, setContactIndustry] = useState("all");
   const [companyIndustry, setCompanyIndustry] = useState("all");
-  const [companyView, setCompanyView] = useState<"cards" | "table">("cards");
+  const [companyView, setCompanyView] = useState<"cards" | "table">("table");
   const [activityFilter, setActivityFilter] = useState("all");
-  const [settingsView, setSettingsView] = useState<"connections" | "workflow" | "delivery">("connections");
+  const [settingsView, setSettingsView] = useState<"connections" | "workflow" | "delivery" | "users">("connections");
+  const [appUsers, setAppUsers] = useState<any[]>([]);
+
+  const loadUsers = async () => {
+    try {
+      const res = await fetch("/api/admin/users");
+      const data = await res.json();
+      if (data.ok) {
+        setAppUsers(data.users);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    if (settingsView === "users" && control?.userStatus?.role === "admin") {
+      loadUsers();
+    }
+  }, [settingsView, control?.userStatus?.role]);
+
+  const updateUserStatus = async (email: string, status: string) => {
+    try {
+      setWorking(true);
+      const res = await fetch("/api/admin/users", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, status })
+      });
+      if (res.ok) {
+        showToast(`User ${email} is now ${status}`);
+        loadUsers();
+      } else {
+        const err = await res.json();
+        showToast(err.error || "Failed to update user");
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setWorking(false);
+    }
+  };
   const [accessBannerExpanded, setAccessBannerExpanded] = useState(false);
   const [accessKeyInput, setAccessKeyInput] = useState("");
   const [accessKeyError, setAccessKeyError] = useState("");
@@ -683,7 +765,7 @@ export default function Home() {
   const latestCompletedBackgroundJob = useMemo(() => backgroundJobs.find((job) => ["completed", "completed_with_issues", "failed"].includes(job.status)), [backgroundJobs]);
   const displayCampaigns = useMemo(() => Array.isArray(control?.campaigns) ? control.campaigns.map((campaign) => ({
     id: String(campaign.id || campaign.name),
-    name: String(campaign.name || "IKF Reach"),
+    name: String(campaign.name || "IKF Spark"),
     status: paused ? "paused_user_hold" : String(campaign.status || "active"),
     drafts: displayEmails.filter((email) => email.campaign === campaign.name).length,
     senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
@@ -1502,20 +1584,174 @@ export default function Home() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <>
+      {!control ? (
+        <div className="landing-wrapper" style={{ justifyContent: 'center', alignItems: 'center' }}>
+          <div className="landing-login-box" style={{ textAlign: 'center' }}>
+            <div className="landing-logo-badge" style={{ margin: '0 auto 16px' }}>IKF</div>
+            <h2>Connecting to IKF Spark</h2>
+            <p>Loading workspace configuration and system status...</p>
+          </div>
+        </div>
+      ) : !control?.userStatus?.email ? (
+        <div className="landing-wrapper">
+          <header className="landing-header">
+            <div className="landing-brand">
+              <div className="landing-logo-badge">IKF</div>
+              <div className="landing-brand-text">
+                <h1>IKF Spark</h1>
+                <span>AI Email Operations</span>
+              </div>
+            </div>
+            <div className="landing-header-status">
+              <span className="dot" />
+              <span>System Operational</span>
+            </div>
+          </header>
+
+          <main className="landing-body">
+            <section className="landing-hero">
+              <div className="landing-hero-content">
+                <div className="landing-badge">
+                  <span>✨</span> AI-Powered Enterprise Email Portal
+                </div>
+                <h1 className="landing-title">Automate High-Impact Outreach with Precision & Safety</h1>
+                <p className="landing-subtitle">
+                  IKF Spark combines smart contact verification, personalized email drafting, and automated 24/7 delivery with enterprise-grade controls.
+                </p>
+
+                <div className="landing-preview-card" style={{ width: '100%' }}>
+                  <div className="preview-card-header">
+                    <strong>IKF Spark Operations</strong>
+                    <span>Live Verification & Delivery</span>
+                  </div>
+                  <div className="preview-metrics-grid">
+                    <div className="preview-metric-box">
+                      <span>VERIFIED CONTACTS</span>
+                      <strong>100%</strong>
+                    </div>
+                    <div className="preview-metric-box">
+                      <span>DELIVERY SAFETY</span>
+                      <strong>Active</strong>
+                    </div>
+                    <div className="preview-metric-box">
+                      <span>AUTOMATION</span>
+                      <strong>24/7</strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="landing-login-box">
+                <h2>Sign in to Workspace</h2>
+                <p>Use your authorized Google account to log into the outreach operation console.</p>
+                
+                <a href="/api/auth/google" className="btn-google-login">
+                  <svg width="20" height="20" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
+                    <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+                    <path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9.001c0 1.452.348 2.827.957 4.042l3.007-2.336z" fill="#FBBC05"/>
+                    <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+                  </svg>
+                  Sign in with Google
+                </a>
+
+                <div className="landing-login-footer">
+                  <span>Protected by IKF Access Security.<br/>Unapproved accounts require admin verification.</span>
+                </div>
+              </div>
+            </section>
+
+            <section className="landing-features-grid">
+              <div className="feature-card">
+                <div className="feature-icon">🔍</div>
+                <h3>Contact Intelligence</h3>
+                <p>Validate email formats, MX records, disposable mailboxes, and deliverability before sending a single draft.</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">✨</div>
+                <h3>AI Content Personalization</h3>
+                <p>Generate highly-contextual email body drafts tailored to specific executive roles and corporate focus areas.</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">📊</div>
+                <h3>Analytics & Governance</h3>
+                <p>Track delivery metrics, set strict daily sending caps, and manage team access permissions with master admin controls.</p>
+              </div>
+            </section>
+          </main>
+
+          <footer className="landing-footer">
+            <span>© {new Date().getFullYear()} IKF Spark. All rights reserved.</span>
+            <span>AI Outreach Operations Engine</span>
+          </footer>
+        </div>
+      ) : control?.userStatus?.status === "pending" || control?.userStatus?.status === "rejected" ? (
+        <div className="landing-wrapper">
+          <header className="landing-header">
+            <div className="landing-brand">
+              <div className="landing-logo-badge">IKF</div>
+              <div className="landing-brand-text">
+                <h1>IKF Spark</h1>
+                <span>AI Email Operations</span>
+              </div>
+            </div>
+          </header>
+
+          <main className="landing-body" style={{ justifyContent: 'center', alignItems: 'center' }}>
+            <div className="landing-login-box pending-state-box">
+              <div className="pending-status-badge">
+                <span>⏳</span> Account Pending Approval
+              </div>
+              <h2>Access Requested</h2>
+              <p>Your Google account has been registered in the workspace, but requires administrator approval before you can access the operational dashboard.</p>
+              
+              <div className="pending-user-chip">
+                <div className="pending-user-avatar">
+                  {control.userStatus.email.slice(0, 1).toUpperCase()}
+                </div>
+                <span>{control.userStatus.email}</span>
+              </div>
+
+              <form action="/api/auth/logout" method="POST">
+                <button type="submit" className="btn-signout">Sign out / Change account</button>
+              </form>
+            </div>
+          </main>
+
+          <footer className="landing-footer">
+            <span>© {new Date().getFullYear()} IKF Spark. All rights reserved.</span>
+            <span>Access Control Engine</span>
+          </footer>
+        </div>
+      ) : (
+        <div className={`app-shell ${sidebarCollapsed ? "sidebar-is-collapsed" : ""}`}>
+      <>
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
         <div className="sidebar-brand-row">
-          <div className="brand-mark"><span>IKF</span><b>Reach</b></div>
+          <div className="brand-mark">
+            <span>IKF</span>
+            {!sidebarCollapsed && <b>Spark</b>}
+          </div>
+          <button
+            type="button"
+            className="sidebar-collapse-btn"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label="Toggle sidebar collapse"
+          >
+            {sidebarCollapsed ? "☰" : "‹"}
+          </button>
           <button className={`mobile-menu-toggle ${mobileMenuOpen ? "open" : ""}`} type="button" aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen} aria-controls="dashboard-navigation" onClick={() => setMobileMenuOpen((open) => !open)}>
             <span /><span /><span />
           </button>
         </div>
-        <p className="brand-caption">AI email operations</p>
+        {!sidebarCollapsed && <p className="brand-caption">AI email operations</p>}
         <nav id="dashboard-navigation" className={mobileMenuOpen ? "mobile-open" : ""} aria-label="Dashboard sections">
-          <div className="mobile-menu-intro"><strong>IKF Reach workspace</strong><span>Select a section to continue</span></div>
+          <div className="mobile-menu-intro"><strong>IKF Spark workspace</strong><span>Select a section to continue</span></div>
           {navItems.map((item) => (
-            <button key={item.id} className={section === item.id ? "active" : ""} aria-current={section === item.id ? "page" : undefined} onClick={() => switchSection(item.id)}>
-              <span aria-hidden="true">{item.icon}</span>{item.label}
+            <button key={item.id} className={section === item.id ? "active" : ""} aria-current={section === item.id ? "page" : undefined} onClick={() => switchSection(item.id)} title={item.label}>
+              <span aria-hidden="true">{item.icon}</span>{!sidebarCollapsed && item.label}
             </button>
           ))}
           <div className="mobile-menu-status"><span className="sync-dot" /><div><strong>Live database</strong><small>{refreshing ? "Refreshing…" : control?.refreshedAt ? `Updated ${new Date(control.refreshedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : "Connecting…"}</small></div></div>
@@ -1523,18 +1759,33 @@ export default function Home() {
         {mobileMenuOpen && <button className="mobile-menu-backdrop" type="button" aria-label="Close navigation menu" onClick={() => setMobileMenuOpen(false)} />}
         <div className="sidebar-footer">
           <span className="sync-dot" />
-          <div>
-            <strong>Live database</strong>
-            <small>{refreshing ? "Refreshing…" : control?.refreshedAt ? `Updated ${new Date(control.refreshedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : "Connecting…"}</small>
-          </div>
+          {!sidebarCollapsed && (
+            <div>
+              <strong>Live database</strong>
+              <small>{refreshing ? "Refreshing…" : control?.refreshedAt ? `Updated ${new Date(control.refreshedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : "Connecting…"}</small>
+            </div>
+          )}
         </div>
       </aside>
 
       <main>
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Masterclass IKF Reach</p>
-            <h1>{pageTitle}</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+            <button
+              type="button"
+              className="sidebar-hamburger-btn"
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              <span className="hamburger-bar" />
+              <span className="hamburger-bar" />
+              <span className="hamburger-bar" />
+            </button>
+            <div>
+              <p className="eyebrow">Masterclass IKF Spark</p>
+              <h1>{pageTitle}</h1>
+            </div>
           </div>
           <div className="top-actions">
             <label className="global-search">
@@ -1542,13 +1793,18 @@ export default function Home() {
               <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setContactPage(1); setCompanyPage(1); }} placeholder={searchPlaceholder} aria-label={searchPlaceholder} />
             </label>
             <button className="refresh-button" onClick={loadControl} disabled={refreshing} aria-label="Refresh live dashboard data">{refreshing ? "Refreshing…" : "Refresh"}</button>
+            {control?.canManage && (
+              <form action="/api/auth/logout" method="POST">
+                <button type="submit" className="quiet-action" title="Log out">Log out</button>
+              </form>
+            )}
             <div className="avatar" aria-label="Tanishka">T</div>
           </div>
         </header>
 
         <div className="content">
           {!control && (
-            <section className="system-banner loading-banner" role="status"><span className="loading-spinner" /><div><strong>Loading live IKF Reach data</strong><p>Connecting to Supabase and Brevo.</p></div></section>
+            <section className="system-banner loading-banner" role="status"><span className="loading-spinner" /><div><strong>Loading live IKF Spark data</strong><p>Connecting to Supabase and Brevo.</p></div></section>
           )}
           {control && !control.ok && (
             <section className="system-banner error-banner" role="alert"><div><strong>Live data is temporarily unavailable</strong><p>{control.error || "Please try the connection again."}</p></div><button onClick={loadControl}>Retry</button></section>
@@ -1567,7 +1823,10 @@ export default function Home() {
                   aria-label="Team access key"
                 />
                 <button type="button" onClick={unlockWithAccessKey} disabled={!accessKeyInput.trim()}>Unlock</button>
-                <a href="/signin-with-chatgpt?return_to=%2F">Sign in</a>
+                <a href="/api/auth/google" className="primary-action" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0.5rem 1rem', background: '#fff', color: '#3c4043', border: '1px solid #dadce0', borderRadius: '4px', textDecoration: 'none', fontWeight: 500 }}>
+                  <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg" style={{ marginRight: '8px' }}><path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/><path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/><path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9.001c0 1.452.348 2.827.957 4.042l3.007-2.336z" fill="#FBBC05"/><path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/></svg>
+                  Sign in with Google
+                </a>
               </div>
               {accessKeyError && <p className="access-banner-error">{accessKeyError}</p>}
             </section>
@@ -1580,7 +1839,7 @@ export default function Home() {
                 <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </section>
 
-              <section className="metric-grid" aria-label="IKF Reach totals">
+              <section className="metric-grid" aria-label="IKF Spark totals">
                 <Metric label="Generated emails" value={stats.emails} note={`Across ${displayCampaigns.length} campaigns`} tone="violet" />
                 <Metric label="Needs review" value={stats.pendingReview} note="Before approval or scheduling" tone="amber" />
                 <Metric label="All database contacts" value={stats.contacts} note={`${stats.companies} companies across every campaign`} tone="blue" />
@@ -1636,7 +1895,7 @@ export default function Home() {
               <article className="panel campaign-portfolio-hero">
                 <div>
                   <p className="eyebrow">{campaignDetailOpen ? "Campaign workspace" : "Campaign portfolio"}</p>
-                  <h2>{campaignDetailOpen ? selectedCampaignSummary?.name || "Campaign details" : "Every IKF Reach campaign in one place"}</h2>
+                  <h2>{campaignDetailOpen ? selectedCampaignSummary?.name || "Campaign details" : "Every IKF Spark campaign in one place"}</h2>
                   <p>{campaignDetailOpen ? "Review the template, generated emails, live status, and delivery controls for this campaign." : "Choose a campaign to open its emails, template, status, and sending controls."}</p>
                 </div>
                 {campaignDetailOpen ? <button className="quiet-action campaign-back-button" onClick={() => { setCampaignDetailOpen(false); setCampaignWorkspaceView("overview"); setSelectedIds(new Set()); setBulkMode(null); }}>← Back to campaigns</button> : <button className="primary-action" onClick={() => switchSection("create")}>Create new campaign</button>}
@@ -2065,23 +2324,21 @@ export default function Home() {
                   <div><p className="eyebrow">Inbox preview</p><h3>Send {selectedIds.size} selected email{selectedIds.size === 1 ? "" : "s"} as a test</h3><p>The preview will be delivered only to the email address you enter. The original client will not receive anything and the draft status will remain unchanged.</p></div>
                   <label className="test-recipient-field"><span>Send test to</span><input type="email" value={bulkForm.testRecipients} onChange={(e) => setBulkForm({ ...bulkForm, testRecipients: e.target.value })} placeholder="Enter your email address" autoComplete="email" /><small>Example: your.name@company.com</small></label>
                   <label className="confirm-box"><input type="checkbox" checked={bulkForm.confirmed} onChange={(e) => setBulkForm({ ...bulkForm, confirmed: e.target.checked })} /><span>I confirm that this is my test inbox and want to receive the preview.</span></label>
-                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-send-action" disabled={!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bulkForm.testRecipients.trim()) || !bulkForm.confirmed || working} onClick={runTestSend}>{working ? "Sending test…" : "Send test email"}</button></div>
+                  <div className="bulk-actions"><button className="quiet-action" onClick={() => setBulkMode(null)}>Cancel</button><button className="test-action" disabled={!isValidEmail(bulkForm.testRecipients) || !bulkForm.confirmed || working} onClick={runBulkTest}>{working ? "Sending preview…" : "Send test preview"}</button></div>
                 </div>
               )}
-              <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} unsubscribedEmails={unsubscribedEmails} />
-              <div className="pagination"><span>Page {page} of {pages}</span><div><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div></div>
-            </section>
-          )}
+                  <EmailTable rows={pagedEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} unsubscribedEmails={unsubscribedEmails} />
+                  <div className="pagination"><span>Page {page} of {pages}</span><div><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div></div>
+                </section>
+              )}
 
-          {section === "statistics" && (
-            <StatisticsDashboard emails={displayEmails} />
-          )}
 
           {section === "create" && (
-            <section className="intelligence-layout">
+            <section className="campaign-studio-wrapper">
               {(() => {
                 const isStep1Valid = !!(intakeForm.campaignName.trim() && intakeForm.topic.trim() && intakeForm.emailTemplate.trim());
                 const isStep2Valid = !!(intakeForm.rawInput.trim() || intakeForm.websites.trim() || intakeFile);
+                const isFormValid = isStep1Valid && isStep2Valid;
                 const parsedEmails = (intakeForm.rawInput.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/gi) || []).length;
                 const rawInputWithoutEmails = intakeForm.rawInput.replace(/[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+/gi, " ");
                 const parsedWebsites = (rawInputWithoutEmails.match(/(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9._-]+\.(com|org|net|io|in|co))/gi) || []).length;
@@ -2090,187 +2347,232 @@ export default function Home() {
                 const scannedSkippedCount = websiteScans.filter((scan) => scan.skipped).length;
 
                 return (
-                  <article className="intelligence-studio-container">
-                    <div className="studio-hero-modern">
-                      <nav className="wizard-track" aria-label="Campaign creation steps">
-                        <div className="wizard-track-rail"><div className="wizard-track-fill" style={{ width: `${((currentStep - 1) / 2) * 100}%` }} /></div>
-                        <button type="button" className={`track-step ${currentStep === 1 ? 'is-active' : ''} ${isStep1Valid && currentStep !== 1 ? 'is-done' : ''}`} onClick={() => setCurrentStep(1)}>
-                          <span className="track-index">{isStep1Valid && currentStep !== 1 ? '✓' : '01'}</span>
-                          <span className="track-copy"><strong>Setup</strong><small>Name &amp; template</small></span>
+                  <form className="campaign-studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
+                    <article className="studio-process-card">
+                      {/* Top Process Stepper Track Bar */}
+                      <div className="studio-stepper-bar">
+                        <button type="button" className={`stepper-pill ${currentStep === 1 ? 'is-active' : isStep1Valid ? 'is-done' : ''}`} onClick={() => setCurrentStep(1)}>
+                          <span className="stepper-num">{isStep1Valid && currentStep !== 1 ? '✓' : '1'}</span>
+                          <span>01 Setup &amp; Template</span>
                         </button>
-                        <span className={`track-arrow ${isStep1Valid ? 'is-filled' : ''}`} aria-hidden="true">›</span>
-                        <button type="button" disabled={!isStep1Valid} className={`track-step ${currentStep === 2 ? 'is-active' : ''} ${isStep2Valid && currentStep !== 2 ? 'is-done' : ''}`} onClick={() => setCurrentStep(2)}>
-                          <span className="track-index">{isStep2Valid && currentStep !== 2 ? '✓' : '02'}</span>
-                          <span className="track-copy"><strong>Audience</strong><small>Contacts &amp; context</small></span>
+                        <span className="stepper-divider">›</span>
+                        <button type="button" disabled={!isStep1Valid} className={`stepper-pill ${currentStep === 2 ? 'is-active' : isStep2Valid ? 'is-done' : ''}`} onClick={() => setCurrentStep(2)}>
+                          <span className="stepper-num">{isStep2Valid && currentStep !== 2 ? '✓' : '2'}</span>
+                          <span>02 Audience &amp; Context</span>
                         </button>
-                        <span className={`track-arrow ${isStep2Valid ? 'is-filled' : ''}`} aria-hidden="true">›</span>
-                        <button type="button" disabled={!isStep1Valid || !isStep2Valid} className={`track-step ${currentStep === 3 ? 'is-active' : ''}`} onClick={() => setCurrentStep(3)}>
-                          <span className="track-index">03</span>
-                          <span className="track-copy"><strong>Generate</strong><small>Review &amp; send</small></span>
+                        <span className="stepper-divider">›</span>
+                        <button type="button" disabled={!isStep1Valid || !isStep2Valid} className={`stepper-pill ${currentStep === 3 ? 'is-active' : ''}`} onClick={() => setCurrentStep(3)}>
+                          <span className="stepper-num">3</span>
+                          <span>03 Review &amp; Launch</span>
                         </button>
-                      </nav>
-                    </div>
-                    <form className="studio-form" onSubmit={(event) => { event.preventDefault(); runIntelligenceStudio("draft"); }}>
+                      </div>
+
+                      {/* STEP 1: Campaign Setup & Template */}
                       {currentStep === 1 && (
-                        <div className="modern-step-card">
-                          <div className="wizard-header"><span className="wizard-badge">1</span><h3 className="wizard-title">Campaign Setup</h3></div>
-                          <div className="campaign-setup-grid" id="campaign-setup">
-                            <label className="topic-field"><span>Campaign name</span><input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders - August 2026" /><small>Every draft from this set stays together under this campaign.</small></label>
-                            <label className="topic-field"><span>Email topic / subject template</span><input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {{company}} - Product Launch 2026" /><small>Use <code>{"{ASSOCIATION NAME}"}</code> or <code>{"{{company}}"}</code> to insert each recipient’s company. If omitted, the company name is added at the start.</small></label>
+                        <div className="process-step-content">
+                          <div className="process-step-header">
+                            <h2>Step 1: Campaign Identity &amp; Email Template</h2>
+                            <p>Give your campaign a title, define the subject line format, and write your email content.</p>
                           </div>
-                          <section className="template-field" style={{ marginTop: 24 }}>
-                            <div className="template-field-heading">
-                              <span>Your email template</span>
-                              <small>Rich campaign template · Version {intakeForm.emailTemplateVersion}</small>
+
+                          <div className="process-grid-2col">
+                            <label className="topic-field">
+                              <span>Campaign Name</span>
+                              <input required value={intakeForm.campaignName} onChange={(event) => setIntakeForm({ ...intakeForm, campaignName: event.target.value })} placeholder="Example: Manufacturing Leaders - August 2026" />
+                              <small>Every draft generated stays organized under this campaign.</small>
+                            </label>
+                            <label className="topic-field">
+                              <span>Email Subject Template</span>
+                              <input required value={intakeForm.topic} onChange={(event) => setIntakeForm({ ...intakeForm, topic: event.target.value })} placeholder="Example: {{company}} - Product Launch 2026" />
+                              <small>Use <code>{"{{company}}"}</code> or <code>{"{{name}}"}</code> to insert values automatically.</small>
+                            </label>
+                          </div>
+
+                          <div className="template-editor-wrapper" style={{ marginTop: 24 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                              <strong style={{ fontSize: 14, color: '#0f172a' }}>Rich Email Template</strong>
+                              <span className="version-pill">Rich Template v{intakeForm.emailTemplateVersion}</span>
                             </div>
                             <RichEmailEditor
                               value={intakeForm.emailTemplate}
                               disabled={working}
                               onChange={(emailTemplate) => setIntakeForm((current) => ({ ...current, emailTemplate }))}
                             />
-                            <small>Use the <strong>Personalize</strong> menu to insert contact, company, research, topic, industry, website, or focus-area fields. Formatting around each field is preserved in every generated email. Missing values and curly brackets are removed safely before review or delivery.</small>
-                          </section>
-                          <div className="wizard-nav">
+                          </div>
+
+                          <div className="process-footer-nav">
                             <div />
-                            <button type="button" className="btn-next" disabled={!isStep1Valid} onClick={() => setCurrentStep(2)}>Next: Add Audience →</button>
+                            <button type="button" className="btn-next" disabled={!isStep1Valid} onClick={() => setCurrentStep(2)}>
+                              Next: Add Audience &amp; Context →
+                            </button>
                           </div>
                         </div>
                       )}
 
+                      {/* STEP 2: Audience & Context */}
                       {currentStep === 2 && (
-                        <div className="modern-step-card">
-                          <div className="wizard-header"><span className="wizard-badge">2</span><h3 className="wizard-title">Add Your Audience</h3></div>
-                          
-                          <div className="audience-setup-section">
-                            <h4 className="section-subheading">Data Sources</h4>
-                            <div className="source-grid">
-                              <label className="source-card">
-                                <span className="source-icon">Aa</span><strong>Paste names and emails</strong><small>One per line, CSV, or Name &lt;email&gt;</small>
-                                <textarea rows={6} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
-                                {(parsedEmails > 0 || parsedWebsites > 0) && (
-                                  <div className="extraction-badge">✨ Found {parsedEmails} email{parsedEmails !== 1 ? 's' : ''} and {parsedWebsites} website{parsedWebsites !== 1 ? 's' : ''}</div>
-                                )}
+                        <div className="process-step-content">
+                          <div className="process-step-header">
+                            <h2>Step 2: Target Audience &amp; AI Instructions</h2>
+                            <p>Import recipient contacts, crawl company websites for public emails, or upload a document.</p>
+                          </div>
+
+                          {/* Segmented Source Switcher */}
+                          <div className="source-segmented-control" role="tablist">
+                            <button type="button" role="tab" aria-selected={sourceTab === "raw"} className={`source-segment-btn ${sourceTab === "raw" ? "is-active" : ""}`} onClick={() => setSourceTab("raw")}>
+                              <span className="segment-icon">Aa</span>
+                              <div className="segment-copy">
+                                <strong>Paste Contacts</strong>
+                                <small>{parsedEmails > 0 ? `${parsedEmails} email${parsedEmails !== 1 ? 's' : ''}` : "Direct list"}</small>
+                              </div>
+                              {parsedEmails > 0 && <span className="segment-badge">{parsedEmails}</span>}
+                            </button>
+
+                            <button type="button" role="tab" aria-selected={sourceTab === "websites"} className={`source-segment-btn ${sourceTab === "websites" ? "is-active" : ""}`} onClick={() => setSourceTab("websites")}>
+                              <span className="segment-icon">🌐</span>
+                              <div className="segment-copy">
+                                <strong>Website Crawler</strong>
+                                <small>{websiteScans.length > 0 ? `${scannedEmailCount} emails` : "Auto-scan"}</small>
+                              </div>
+                              {websiteScans.length > 0 && <span className="segment-badge">{websiteScans.length}</span>}
+                            </button>
+
+                            <button type="button" role="tab" aria-selected={sourceTab === "file"} className={`source-segment-btn ${sourceTab === "file" ? "is-active" : ""}`} onClick={() => setSourceTab("file")}>
+                              <span className="segment-icon">📄</span>
+                              <div className="segment-copy">
+                                <strong>Upload File</strong>
+                                <small>{intakeFile ? intakeFile.name : "CSV, PDF, DOCX"}</small>
+                              </div>
+                              {intakeFile && <span className="segment-badge">Ready</span>}
+                            </button>
+                          </div>
+
+                          {/* Workspace Panel */}
+                          <div className="source-workspace-card" style={{ marginTop: 16 }}>
+                            {sourceTab === "raw" && (
+                              <label className="brief-field" style={{ gap: 8 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span>Direct Contacts <small>(Name &lt;email&gt; or CSV format)</small></span>
+                                  {(parsedEmails > 0 || parsedWebsites > 0) && (
+                                    <div className="extraction-badge">✨ Extracted {parsedEmails} email{parsedEmails !== 1 ? 's' : ''}</div>
+                                  )}
+                                </div>
+                                <textarea className="workspace-textarea" rows={7} value={intakeForm.rawInput} onChange={(event) => setIntakeForm({ ...intakeForm, rawInput: event.target.value })} placeholder={"Suraj Sonnar <suraj@company.com>\nPriya, priya@company.in, Company Name\ninfo@company.org"} />
                               </label>
-                              <div className="source-card website-source-card">
-                                <span className="source-icon">www</span><strong>Add company websites</strong><small>Add as many websites as you need.</small>
-                                <textarea id="website-sources" aria-label="Company websites" rows={6} value={intakeForm.websites} onChange={(event) => { setIntakeForm({ ...intakeForm, websites: event.target.value }); setWebsiteScans([]); }} placeholder={"www.company.com\nhttps://association.org/contact-us/\nexample.in"} />
+                            )}
+
+                            {sourceTab === "websites" && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                <label className="brief-field" style={{ gap: 8 }}>
+                                  <span>Company Websites <small>(URLs to scan for public email addresses)</small></span>
+                                  <textarea className="workspace-textarea" rows={5} value={intakeForm.websites} onChange={(event) => { setIntakeForm({ ...intakeForm, websites: event.target.value }); setWebsiteScans([]); }} placeholder={"www.company.com\nhttps://association.org/contact-us/\nexample.in"} />
+                                </label>
                                 {savingDiscoveredContacts && !scanningWebsites ? (
-                                  <div className="scan-progress" role="status" aria-live="polite">
-                                    <div className="scan-progress-row"><span>Saving found contacts to the database…</span></div>
-                                    <i><b className="scan-progress-indeterminate" /></i>
-                                  </div>
+                                  <div className="scan-progress"><span>Saving found contacts to database…</span></div>
                                 ) : scanningWebsites && scanProgress ? (
-                                  <div className="scan-progress" role="status" aria-live="polite">
-                                    <div className="scan-progress-row">
-                                      <span>Scanning websites… {scanProgress.completed} of {scanProgress.total || "?"}</span>
-                                      {!(scanProgress.total > 0 && scanProgress.completed >= scanProgress.total) && (
-                                        <button type="button" className="scan-stop-button" onClick={stopWebsiteDiscovery}>Stop</button>
-                                      )}
-                                    </div>
-                                    <i><b style={{ width: `${scanProgress.total ? Math.min(100, Math.round((scanProgress.completed / scanProgress.total) * 100)) : 0}%` }} /></i>
-                                    {scanWaitNote && <small className="scan-progress-note scan-progress-warn">{scanWaitNote}</small>}
-                                    {scanSavedTotals && (scanSavedTotals.contactsCreated > 0 || scanSavedTotals.companiesCreated > 0) && (
-                                      <small className="scan-progress-note">✓ {scanSavedTotals.contactsCreated} contact{scanSavedTotals.contactsCreated === 1 ? "" : "s"} already saved to the database as it goes</small>
-                                    )}
-                                  </div>
+                                  <div className="scan-progress"><span>Scanning websites… {scanProgress.completed} of {scanProgress.total || "?"}</span></div>
                                 ) : (
-                                  <button type="button" className="website-scan-button" disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>{websiteScans.length > 0 ? "Resume scanning" : "Find public email addresses"}</button>
+                                  <button type="button" className="website-scan-button" style={{ padding: '12px' }} disabled={scanningWebsites || working || !control?.canManage || !intakeForm.websites.trim()} onClick={runWebsiteDiscovery}>
+                                    {websiteScans.length > 0 ? "Resume scanning" : "Start Automated Email Crawler"}
+                                  </button>
                                 )}
                               </div>
-                              <label className={`source-card upload-card ${intakeFile ? "has-file" : ""}`}>
-                                <span className="source-icon">↑</span><strong>Upload a contact document</strong><small>PDF, DOCX, CSV, TSV, or TXT · up to 6 MB.</small>
-                                <div className="upload-dropzone">
-                                  <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
-                                  <span className="file-cta">{intakeFile ? intakeFile.name : "Choose document"}</span>
+                            )}
+
+                            {sourceTab === "file" && (
+                              <label className={`upload-dropzone ${intakeFile ? "has-file" : ""}`}>
+                                <input type="file" accept=".pdf,.docx,.csv,.tsv,.txt" onChange={(event) => handleFileSelection(event.target.files?.[0] || null)} />
+                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                                  <span className="source-icon">↑</span>
+                                  <strong>{intakeFile ? intakeFile.name : "Drag & drop or click to upload contact file"}</strong>
+                                  <span className="file-cta">Supports CSV, TSV, PDF, DOCX, TXT (up to 6 MB)</span>
                                 </div>
                               </label>
-                            </div>
+                            )}
                           </div>
 
-                          <div className="audience-setup-section" style={{ marginTop: 32 }}>
-                            <div className="context-header">
-                              <h4 className="section-subheading" style={{ textTransform: 'uppercase', fontSize: '13px', letterSpacing: '0.5px' }}>Context & AI Instructions</h4>
-                            </div>
-                            <div className="context-grid">
-                              <label className="brief-field">
-                                <span>Industry / business domain <small>(Leave blank to auto-detect)</small></span>
-                                <input list="industry-domain-options" value={intakeForm.industry} onChange={(event) => setIntakeForm({ ...intakeForm, industry: event.target.value })} placeholder="E.g. Healthcare, Fintech, Manufacturing" />
-                              </label>
-                              <label className="brief-field">
-                                <span>Optional context or instructions</span>
-                                <textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention the audience, desired outcome, offer, industry angle, or specific pain points." />
-                              </label>
-                            </div>
+                          {/* Context Grid */}
+                          <div className="process-grid-2col" style={{ marginTop: 24 }}>
+                            <label className="brief-field">
+                              <span>Industry / Business Domain</span>
+                              <input list="industry-domain-options" value={intakeForm.industry} onChange={(event) => setIntakeForm({ ...intakeForm, industry: event.target.value })} placeholder="E.g. Healthcare, Fintech, Manufacturing" />
+                            </label>
+                            <label className="brief-field">
+                              <span>Custom AI Instructions</span>
+                              <textarea rows={3} value={intakeForm.brief} onChange={(event) => setIntakeForm({ ...intakeForm, brief: event.target.value })} placeholder="Mention specific audience angle, offer details, or pain points." />
+                            </label>
                           </div>
-                          {websiteScans.length > 0 && (
-                            <section className="website-scan-results" aria-live="polite" style={{ marginTop: 24 }}>
-                              <div><span><strong>Website scan results</strong><small>{websiteScans.length} checked · {scannedOkCount} responded · {scannedEmailCount} email{scannedEmailCount === 1 ? "" : "s"} found{scannedSkippedCount ? ` · ${scannedSkippedCount} already in database (skipped)` : ""}</small></span><span className="website-scan-actions"><button type="button" className="website-scan-button" disabled={savingDiscoveredContacts || working || !control?.canManage || !websiteScans.some((scan) => scan.discoveredEmails.length > 0)} onClick={saveDiscoveredContacts} title="Save the discovered companies and email addresses to the database now, without creating a campaign">{savingDiscoveredContacts ? "Saving…" : "Save found contacts to database"}</button><button type="button" onClick={() => setWebsiteScans([])}>Clear results</button></span></div>
-                              <div className="website-scan-grid">
-                                {websiteScans.map((scan) => (
-                                  <article className={scan.skipped ? "website-scan-card skipped" : scan.ok ? "website-scan-card" : "website-scan-card failed"} key={scan.input}>
-                                    <span className="scan-state">{scan.skipped ? "↷" : scan.ok ? "✓" : "!"}</span>
-                                    <div>
-                                      <strong>{scan.companyName || scan.input}</strong>
-                                      <small>{scan.skipped ? "Already in the database — scan skipped" : scan.ok ? `${scan.pagesReviewed.length} public page${scan.pagesReviewed.length === 1 ? "" : "s"} scanned` : scan.error}</small>
-                                      {scan.discoveredEmails.length ? <div className="email-chip-list">{scan.discoveredEmails.map((email) => <span key={email}>{email}</span>)}</div> : (scan.ok && !scan.skipped) && <p>No public email address found on the scanned pages.</p>}
-                                    </div>
-                                  </article>
-                                ))}
-                              </div>
-                            </section>
-                          )}
-                          <div className="wizard-nav">
-                            <button type="button" className="btn-back" onClick={() => setCurrentStep(1)}>← Back</button>
-                            <button type="button" className="btn-next" disabled={!isStep2Valid} onClick={() => setCurrentStep(3)}>Next: Review & Create →</button>
+
+                          <div className="process-footer-nav">
+                            <button type="button" className="btn-back" onClick={() => setCurrentStep(1)}>← Back to Setup</button>
+                            <button type="button" className="btn-next" disabled={!isStep2Valid} onClick={() => setCurrentStep(3)}>
+                              Next: Review &amp; Launch →
+                            </button>
                           </div>
                         </div>
                       )}
 
+                      {/* STEP 3: Review & Launch */}
                       {currentStep === 3 && (
-                        <div className="modern-step-card">
-                          <div className="wizard-header"><span className="wizard-badge">3</span><h3 className="wizard-title">Review Campaign Settings</h3></div>
-                          <section className="campaign-creation-actions" style={{ borderTop: 'none', paddingTop: 0 }}>
-                            <div className="campaign-identity-fields">
-                              <label className="campaign-sender-field">
-                                <span>Verified Brevo sender</span>
-                                <select value={intakeForm.senderEmail} onChange={(event) => {
-                                  const senderEmail = event.target.value;
-                                  setIntakeForm((current) => ({ ...current, senderEmail, ...(replyToChoice === "sender" ? { replyToEmail: senderEmail } : {}) }));
-                                }}>
-                                  {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
-                                </select>
-                                <small>Used as the visible From address and email signature.</small>
-                              </label>
-                              <label className="campaign-sender-field campaign-reply-field">
-                                <span>Reply-To email</span>
-                                <select value={replyToChoice} onChange={(event) => {
-                                  const choice = event.target.value;
-                                  setReplyToChoice(choice);
-                                  if (choice === "sender") setIntakeForm((current) => ({ ...current, replyToEmail: current.senderEmail }));
-                                  else if (choice !== "custom") setIntakeForm((current) => ({ ...current, replyToEmail: choice }));
-                                }}>
-                                  <option value="sender">Same as selected sender</option>
-                                  {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={`reply-${item.email}`} value={item.email}>{item.email}</option>)}
-                                  <option value="custom">Enter another email</option>
-                                </select>
-                                {replyToChoice === "custom" && <input type="email" required value={intakeForm.replyToEmail} onChange={(event) => setIntakeForm({ ...intakeForm, replyToEmail: event.target.value })} placeholder="replies@yourcompany.com" autoComplete="email" aria-label="Custom Reply-To email" />}
-                                <small>Replies from recipients will be delivered to {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "the valid inbox you enter"}.</small>
-                              </label>
+                        <div className="process-step-content">
+                          <div className="process-step-header">
+                            <h2>Step 3: Review &amp; Launch Campaign</h2>
+                            <p>Verify sender settings, review campaign summary, and launch email generation.</p>
+                          </div>
+
+                          <div className="process-grid-2col">
+                            <label className="campaign-sender-field">
+                              <span>Verified Brevo Sender</span>
+                              <select value={intakeForm.senderEmail} onChange={(event) => {
+                                const senderEmail = event.target.value;
+                                setIntakeForm((current) => ({ ...current, senderEmail, ...(replyToChoice === "sender" ? { replyToEmail: senderEmail } : {}) }));
+                              }}>
+                                {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={item.email} value={item.email}>{item.name} &lt;{item.email}&gt;</option>)}
+                              </select>
+                              <small>Used as the visible From address and email signature.</small>
+                            </label>
+                            <label className="campaign-sender-field">
+                              <span>Reply-To Inbox</span>
+                              <select value={replyToChoice} onChange={(event) => {
+                                const choice = event.target.value;
+                                setReplyToChoice(choice);
+                                if (choice === "sender") setIntakeForm((current) => ({ ...current, replyToEmail: current.senderEmail }));
+                                else if (choice !== "custom") setIntakeForm((current) => ({ ...current, replyToEmail: choice }));
+                              }}>
+                                <option value="sender">Same as selected sender</option>
+                                {(control?.availableSenders || [control?.sender].filter(Boolean)).map((item) => item && <option key={`reply-${item.email}`} value={item.email}>{item.email}</option>)}
+                                <option value="custom">Enter custom email</option>
+                              </select>
+                              {replyToChoice === "custom" && <input type="email" style={{ marginTop: 8 }} required value={intakeForm.replyToEmail} onChange={(event) => setIntakeForm({ ...intakeForm, replyToEmail: event.target.value })} placeholder="replies@yourcompany.com" />}
+                              <small>Replies will be delivered to {isValidEmail(intakeForm.replyToEmail) ? intakeForm.replyToEmail : "valid inbox"}.</small>
+                            </label>
+                          </div>
+
+                          <div className="campaign-summary-card" style={{ marginTop: 24 }}>
+                            <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 14px', color: '#0f172a' }}>Campaign Launch Summary</h3>
+                            <div className="summary-chips-grid">
+                              <div className="summary-chip-item"><small>Campaign Name</small><strong>{intakeForm.campaignName || "Untitled"}</strong></div>
+                              <div className="summary-chip-item"><small>Audience Data</small><strong>{parsedEmails > 0 ? `${parsedEmails} contacts` : intakeFile ? intakeFile.name : "Website list"}</strong></div>
+                              <div className="summary-chip-item"><small>Sender Address</small><strong>{intakeForm.senderEmail}</strong></div>
+                              <div className="summary-chip-item"><small>Template Status</small><strong style={{ color: '#10b981' }}>✓ Rich Template Ready</strong></div>
                             </div>
-                            <div className="campaign-paths">
-                              <div><strong>Choose what happens next</strong><span>Research runs in the background. Sending always remains behind review, approval, and confirmation.</span></div>
-                              <button type="submit" className="quiet-action" disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !isStep1Valid || !isStep2Valid}>{working ? "Queuing campaign…" : "Save as draft campaign"}</button>
-                              <button type="button" className="primary-action" onClick={() => runIntelligenceStudio("delivery")} disabled={working || scanningWebsites || !control?.canManage || !isValidEmail(intakeForm.replyToEmail) || !isStep1Valid || !isStep2Valid}>Continue to campaign setup</button>
+                          </div>
+
+                          <div className="process-footer-nav" style={{ marginTop: 32 }}>
+                            <button type="button" className="btn-back" onClick={() => setCurrentStep(2)}>← Back to Audience</button>
+                            <div style={{ display: 'flex', gap: 12 }}>
+                              <button type="submit" className="btn-draft" disabled={working || !isFormValid}>
+                                {working ? "Saving…" : "Save Draft"}
+                              </button>
+                              <button type="button" className="btn-launch" onClick={() => runIntelligenceStudio("delivery")} disabled={working || !isFormValid}>
+                                ⚡ Launch Campaign &amp; Generate Drafts →
+                              </button>
                             </div>
-                          </section>
-                          <div className="wizard-nav">
-                            <button type="button" className="btn-back" onClick={() => setCurrentStep(2)}>← Back</button>
-                            <div />
                           </div>
                         </div>
                       )}
-                    </form>
-                  </article>
+                    </article>
+                  </form>
                 );
               })()}
 
@@ -2394,7 +2696,7 @@ export default function Home() {
           {section === "settings" && (
             <section className="settings-console">
               <article className={`panel settings-hero ${paused ? "is-paused" : "is-active"}`}>
-                <div><p className="eyebrow">IKF Reach operations</p><h2>Sending is {paused ? "paused and protected" : "active within your limits"}</h2><p>{paused ? "Drafting, research, contact editing, and review remain available. Scheduling and client sending are blocked." : "Only approved emails can be scheduled or sent, inside the delivery limits below."}</p></div>
+                <div><p className="eyebrow">IKF Spark operations</p><h2>Sending is {paused ? "paused and protected" : "active within your limits"}</h2><p>{paused ? "Drafting, research, contact editing, and review remain available. Scheduling and client sending are blocked." : "Only approved emails can be scheduled or sent, inside the delivery limits below."}</p></div>
                 <StatusPill value={paused ? "paused_user_hold" : "active"} />
               </article>
 
@@ -2402,6 +2704,9 @@ export default function Home() {
                 <button className={settingsView === "connections" ? "active" : ""} onClick={() => setSettingsView("connections")}>1. Connections</button>
                 <button className={settingsView === "workflow" ? "active" : ""} onClick={() => setSettingsView("workflow")}>2. Workflow</button>
                 <button className={settingsView === "delivery" ? "active" : ""} onClick={() => setSettingsView("delivery")}>3. Delivery limits</button>
+                {control?.userStatus?.role === "admin" && (
+                  <button className={settingsView === "users" ? "active" : ""} onClick={() => setSettingsView("users")}>4. User Access</button>
+                )}
               </nav>
 
               <article className={`panel settings-section ${settingsView === "connections" ? "" : "settings-section-hidden"}`}>
@@ -2433,6 +2738,47 @@ export default function Home() {
                   <label className={`pause-control ${paused ? "selected" : ""}`}><input disabled={!control?.canManage || working} name="paused" type="checkbox" defaultChecked={control?.settings?.paused ?? true} /><span><strong>Pause all client sending</strong><small>Recommended while campaigns are being prepared or reviewed.</small></span></label>
                   <div className="safety-actions"><div><strong>{control?.canManage ? "Changes apply immediately after saving." : "Sign in with an authorized IKF account to change controls."}</strong><span>Manual approval remains mandatory in both states.</span></div><button disabled={!control?.canManage || working} className="primary-action">{working ? "Saving…" : "Save delivery controls"}</button></div>
                 </form>
+              </article>
+
+              <article className={`panel settings-section ${settingsView === "users" ? "" : "settings-section-hidden"}`}>
+                <div className="settings-section-heading"><div><span className="settings-number">4</span><div><p className="eyebrow">User Management</p><h2>Manage access to IKF Spark</h2><p>Approve or revoke access for users who have signed in with Google.</p></div></div><button onClick={loadUsers} disabled={working}>{working ? "Loading…" : "Refresh list"}</button></div>
+                
+                <div className="table-wrap" style={{ marginTop: '2rem' }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Joined</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {appUsers.map((user) => (
+                        <tr key={user.email}>
+                          <td><strong>{user.email}</strong></td>
+                          <td>{user.role}</td>
+                          <td>{new Date(user.createdAt).toLocaleDateString()}</td>
+                          <td><StatusPill value={user.status} /></td>
+                          <td>
+                            {user.email !== control?.userStatus?.email && (
+                              <div style={{ display: 'flex', gap: '8px' }}>
+                                {user.status !== "approved" && (
+                                  <button type="button" className="primary-action" disabled={working} onClick={() => updateUserStatus(user.email, "approved")} style={{ padding: '4px 12px', minHeight: 'auto' }}>Approve</button>
+                                )}
+                                {user.status !== "rejected" && (
+                                  <button type="button" className="delete-email-action" disabled={working} onClick={() => updateUserStatus(user.email, "rejected")}>Revoke</button>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!appUsers.length && <div className="empty-state">No users found.</div>}
+                </div>
               </article>
             </section>
           )}
@@ -2510,15 +2856,17 @@ export default function Home() {
               <div className="table-wrap contacts-table-wrap"><table className="contacts-table"><thead><tr><th className="contact-select-cell"><input type="checkbox" checked={pageContactsSelected} onChange={togglePageContactSelection} aria-label={pageContactsSelected ? "Clear contacts on this page" : "Select contacts on this page"} /></th><th>Contact</th><th>Company</th><th>Industry</th><th>Validation</th><th>Confidence</th><th>Added</th><th>Action</th></tr></thead><tbody>
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
-                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td className="contact-select-cell"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /></td><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td>{contact.company}</td><td>{contact.industry || "—"}</td><td><ValidationPill result={validation} />{contact.unsubscribed && <span className="validation-pill invalid">Unsubscribed</span>}{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
+                  const cleanCompany = decodeHtmlEntities(contact.company);
+                  return <tr key={contact.id} className={validation?.verdict === "invalid" ? "quarantined-row" : ""}><td className="contact-select-cell"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /></td><td><strong>{contactDisplayName(contact)}</strong><span>{contact.email}</span></td><td><strong>{cleanCompany}</strong></td><td>{decodeHtmlEntities(contact.industry) || "—"}</td><td><ValidationPill result={validation} />{contact.unsubscribed && <span className="validation-pill invalid">Unsubscribed</span>}{validation?.reasons?.[0] && <small className="validation-reason">{validation.reasons[0]}</small>}</td><td><StatusPill value={contact.confidence} /></td><td>{compactDate(contact.createdAt)}</td><td><button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)} title={control?.canManage ? "Edit this contact" : "Sign in with an authorized IKF account to edit"}>Edit</button></td></tr>;
                 })}
               </tbody></table></div>
               <div className="contact-card-list">
                 {pagedContacts.map((contact) => {
                   const validation = validationByContact.get(contact.id);
+                  const cleanCompany = decodeHtmlEntities(contact.company);
                   return <article key={`mobile-${contact.id}`} className={validation?.verdict === "invalid" ? "contact-mobile-card quarantined-row" : "contact-mobile-card"}>
                     <div className="contact-mobile-heading"><label className="mobile-contact-select"><input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => toggleContactSelection(contact.id)} aria-label={`Select ${contact.email}`} /><span /></label><div><strong>{contactDisplayName(contact)}</strong><a href={`mailto:${contact.email}`}>{contact.email}</a></div><ValidationPill result={validation} />{contact.unsubscribed && <span className="validation-pill invalid">Unsubscribed</span>}</div>
-                    <dl><div><dt>Company</dt><dd>{contact.company}</dd></div><div><dt>Industry</dt><dd>{contact.industry || "Not classified"}</dd></div><div><dt>Confidence</dt><dd><StatusPill value={contact.confidence} /></dd></div></dl>
+                    <dl><div><dt>Company</dt><dd>{cleanCompany}</dd></div><div><dt>Industry</dt><dd>{decodeHtmlEntities(contact.industry) || "Not classified"}</dd></div><div><dt>Confidence</dt><dd><StatusPill value={contact.confidence} /></dd></div></dl>
                     {validation?.reasons?.[0] && <p className="validation-reason">{validation.reasons[0]}</p>}
                     <button className="edit-contact-button" disabled={!control?.canManage} onClick={() => openContactEditor(contact)}>Edit contact</button>
                   </article>;
@@ -2535,16 +2883,96 @@ export default function Home() {
           {section === "companies" && (
             <section className="panel data-panel">
               <div className="panel-heading"><div><p className="eyebrow">Organizations</p><h2>{displayCompanies.length} companies</h2><span className="panel-subcopy">Deduplicated by website domain, with every linked contact kept under its company.</span></div><div className="contact-list-controls company-list-controls"><label><span>Industry</span><select value={companyIndustry} onChange={(event) => { setCompanyIndustry(event.target.value); setCompanyPage(1); }}><option value="all">All industries</option>{availableIndustries.map((industry) => <option value={industry} key={industry}>{industry}</option>)}</select></label><label><span>Rows</span><select value={companyPageSize} onChange={(event) => { setCompanyPageSize(Number(event.target.value)); setCompanyPage(1); }}><option value={18}>18</option><option value={50}>50</option><option value={100}>100</option></select></label><div className="view-toggle" role="group" aria-label="Company view"><button type="button" className={companyView === "cards" ? "active" : ""} onClick={() => setCompanyView("cards")}>Cards</button><button type="button" className={companyView === "table" ? "active" : ""} onClick={() => setCompanyView("table")}>Table</button></div></div></div>
-              <div className={`company-grid ${companyView === "cards" ? "" : "view-hidden"}`}>
-                {pagedCompanies.map((company) => {
-                  const website = fullWebsiteUrl(company.website);
-                  return <article key={company.id} className="company-card"><div className="company-letter">{company.name.slice(0, 1)}</div><div><strong>{company.name}</strong><span>{company.industry || "Industry pending verification"}</span><small>{company.contacts} contacts · {company.drafts} drafts</small><div className="company-card-actions"><button type="button" onClick={() => setSelectedCompany(company)}>View contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit company</button>{website && <a className="company-website-url" href={website} target="_blank" rel="noreferrer" title={`Open ${website}`}>{website}</a>}</div></div></article>;
-                })}
-              </div>
-              <div className={`table-wrap company-table-wrap ${companyView === "table" ? "" : "view-hidden"}`}><table className="company-table"><thead><tr><th>Company</th><th>Industry</th><th>Contacts</th><th>Drafts</th><th>Website</th><th>Action</th></tr></thead><tbody>{pagedCompanies.map((company) => {
-                const website = fullWebsiteUrl(company.website);
-                return <tr key={`row-${company.id}`}><td><strong>{company.name}</strong></td><td>{company.industry || "Pending verification"}</td><td>{company.contacts}</td><td>{company.drafts}</td><td>{website ? <a href={website} target="_blank" rel="noreferrer">{website}</a> : "—"}</td><td><div className="company-table-actions"><button type="button" onClick={() => setSelectedCompany(company)}>Contacts</button><button type="button" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit</button></div></td></tr>;
-              })}</tbody></table></div>
+              {companyView === "cards" ? (
+                <div className="company-grid">
+                  {pagedCompanies.map((company) => {
+                    const website = fullWebsiteUrl(company.website);
+                    const cleanName = decodeHtmlEntities(company.name);
+                    const cleanIndustry = decodeHtmlEntities(company.industry);
+                    const domainHost = website ? website.replace(/^https?:\/\//i, "").replace(/\/.*$/, "") : "";
+                    const initialLetter = cleanName.charAt(0).toUpperCase() || "C";
+                    return (
+                      <article key={company.id} className="company-card modern-company-card">
+                        <div className="company-card-header">
+                          <div className="company-avatar-badge">{initialLetter}</div>
+                          <div className="company-card-info">
+                            <strong className="company-name-title" title={cleanName}>{cleanName}</strong>
+                            <span className="company-industry-tag">{cleanIndustry || "Pending verification"}</span>
+                          </div>
+                        </div>
+                        <div className="company-card-body">
+                          <div className="company-meta-chips">
+                            <span className="meta-chip"><b>{company.contacts}</b> contacts</span>
+                            <span className="meta-chip"><b>{company.drafts}</b> drafts</span>
+                          </div>
+                          {domainHost && (
+                            <a className="company-domain-link" href={website} target="_blank" rel="noreferrer" title={`Open ${website}`}>
+                              🌐 {domainHost}
+                            </a>
+                          )}
+                        </div>
+                        <div className="company-card-footer">
+                          <button type="button" className="view-contacts-btn" onClick={() => setSelectedCompany(company)}>
+                            👥 View contacts
+                          </button>
+                          <button type="button" className="edit-company-btn" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>
+                            ✏ Edit
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="table-wrap company-table-wrap">
+                  <table className="company-table modern-company-table">
+                    <thead>
+                      <tr>
+                        <th>Company</th>
+                        <th>Industry</th>
+                        <th>Contacts</th>
+                        <th>Drafts</th>
+                        <th>Website</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedCompanies.map((company) => {
+                        const website = fullWebsiteUrl(company.website);
+                        const cleanName = decodeHtmlEntities(company.name);
+                        const cleanIndustry = decodeHtmlEntities(company.industry);
+                        const domainHost = website ? website.replace(/^https?:\/\//i, "").replace(/\/.*$/, "") : "";
+                        return (
+                          <tr key={`row-${company.id}`}>
+                            <td>
+                              <div className="table-company-cell">
+                                <span className="table-company-avatar">{cleanName.charAt(0).toUpperCase() || "C"}</span>
+                                <strong>{cleanName}</strong>
+                              </div>
+                            </td>
+                            <td><span className="industry-pill">{cleanIndustry || "Pending verification"}</span></td>
+                            <td><b>{company.contacts}</b></td>
+                            <td><b>{company.drafts}</b></td>
+                            <td>
+                              {website ? (
+                                <a href={website} target="_blank" rel="noreferrer" className="company-domain-link">
+                                  🌐 {domainHost}
+                                </a>
+                              ) : "—"}
+                            </td>
+                            <td>
+                              <div className="company-table-actions">
+                                <button type="button" className="view-contacts-btn" onClick={() => setSelectedCompany(company)}>Contacts</button>
+                                <button type="button" className="edit-company-btn" disabled={!control?.canManage} onClick={() => openCompanyEditor(company)}>Edit</button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               {!pagedCompanies.length && <div className="empty-state">No companies match your search.</div>}
               <div className="pagination">
                 <span>{filteredCompanies.length ? `Showing ${(safeCompanyPage - 1) * companyPageSize + 1}–${Math.min(safeCompanyPage * companyPageSize, filteredCompanies.length)} of ${filteredCompanies.length} companies` : "0 companies"} · Page {safeCompanyPage} of {companyPages}</span>
@@ -2674,6 +3102,9 @@ export default function Home() {
           </div>
         </div>
       )}
-    </div>
+      </>
+      </div>
+      )}
+    </>
   );
 }
