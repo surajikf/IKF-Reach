@@ -18,9 +18,10 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            set -e
             export PATH=/opt/plesk/node/25/bin:$PATH
             cd /var/www/vhosts/spark.ikf.in/httpdocs
-            
+
             echo "Pulling latest code from main..."
             git pull origin main
             
