@@ -18,7 +18,8 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL("/?auth=misconfigured", request.url));
   }
 
-  const redirectUri = `${url.protocol}//${url.host}/api/auth/google/callback`;
+  const protocol = request.headers.get("x-forwarded-proto") || url.protocol.replace(':', '');
+  const redirectUri = `${protocol}://${url.host}/api/auth/google/callback`;
 
   try {
     // 1. Exchange the code for an access token
