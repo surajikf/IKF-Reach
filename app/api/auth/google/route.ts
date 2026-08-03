@@ -9,7 +9,8 @@ export async function GET(request: Request) {
 
   // Determine the base URL dynamically based on where the request came from
   const url = new URL(request.url);
-  const redirectUri = `${url.protocol}//${url.host}/api/auth/google/callback`;
+  const protocol = request.headers.get("x-forwarded-proto") || url.protocol.replace(':', '');
+  const redirectUri = `${protocol}://${url.host}/api/auth/google/callback`;
 
   const googleAuthUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   googleAuthUrl.searchParams.set("client_id", clientId);
