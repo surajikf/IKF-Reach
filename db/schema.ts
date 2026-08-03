@@ -159,3 +159,10 @@ export const emailDomainValidationCache = sqliteTable("email_domain_validation_c
   error: text("error"),
   checkedAt: text("checked_at").notNull(),
 });
+
+export const appUsers = sqliteTable("app_users", {
+  email: text("email").primaryKey(),
+  status: text("status").notNull().default("pending"), // pending, approved, rejected
+  role: text("role").notNull().default("user"), // user, admin
+  createdAt: text("created_at").notNull(),
+});

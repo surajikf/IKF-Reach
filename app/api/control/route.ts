@@ -47,11 +47,38 @@ function isLocalRequest(req: NextRequest) {
   return host.includes("localhost") || host.includes("127.0.0.1");
 }
 
-function canManage(req: NextRequest) {
-  if (isLocalRequest(req)) return true;
+import { verifyEmailCookie } from "../auth/utils";
+
+async function getUserStatus(req: NextRequest) {
+  const authCookie = req.cookies.get("ikf_auth")?.value;
+  const email = verifyEmailCookie(authCookie);
+
+  if (!email) return { email: null, status: null, role: null };
+
+  // Hardcoded master admin
+  if (email.toLowerCase() === "suraj.sonnar@ikf.co.in") {
+    return { email, status: "approved", role: "admin" };
+  }
+
+  const db = getQueueDb();
+  const user = await db.prepare("SELECT * FROM app_users WHERE email = ?").bind(email.toLowerCase()).first<{ status: string; role: string }>();
+
+  if (!user) return { email, status: null, role: null };
+  return { email, status: user.status, role: user.role };
+}
+
+async function canManage(req: NextRequest, userStatus?: Awaited<ReturnType<typeof getUserStatus>>) {
   if (allowedOperators.has(actor(req))) return true;
-  const accessKey = process.env.IKF_ACCESS_KEY || "";
-  return Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey;
+
+  // Check standard team access key
+  const accessKey = process.env.IKF_ACCESS_KEY || process.env.NEXT_PUBLIC_TEAM_ACCESS_KEY || "";
+  if (Boolean(accessKey) && req.headers.get("x-ikf-access-key") === accessKey) return true;
+
+  // Check Google Auth user status
+  const status = userStatus || (await getUserStatus(req));
+  if (status.status === "approved") return true;
+
+  return false;
 }
 
 async function db(path: string, init: RequestInit = {}) {
@@ -488,6 +515,34 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: true, jobs: backgroundJobs });
     }
 
+    const userStatus = await getUserStatus(req);
+    const hasAccess = await canManage(req, userStatus);
+
+    if (!hasAccess && !isLocalRequest(req) && userStatus.status !== "approved") {
+      return NextResponse.json({
+        ok: true,
+        canManage: false,
+        userStatus: userStatus,
+        operator: actor(req) || userStatus.email || null,
+        providers: { database: false, brevo: false },
+        queue: [],
+        jobs: [],
+        researchAudit: [],
+        settings: {},
+        campaigns: [],
+        liveEmails: [],
+        liveContacts: [],
+        liveCompanies: [],
+        liveActivity: [],
+        liveStats: { companies: 0, contacts: 0, emails: 0, pendingReview: 0, approved: 0, scheduled: 0, sent: 0, failed: 0 },
+        sender: { name: "", email: "" },
+        availableSenders: [],
+        replyTo: replyTo(),
+        refreshedAt: new Date().toISOString(),
+        scheduling: { provider: "Brevo", timezone: "Asia/Kolkata", maximumHoursAhead: 72 },
+      });
+    }
+
     const [queue, researchAudit, backgroundJobs, allSettings, campaigns, emails, contacts, companies, sends, activityRows, unsubscribedRows] = await Promise.all([
       fetchAllRows("outreach_queue?select=*&order=created_at.desc", 5000),
       db("research_jobs?select=*&order=created_at.desc&limit=25"),
@@ -533,7 +588,7 @@ export async function GET(req: NextRequest) {
         recipient: contact.email || "",
         recipientName: contact.full_name || "",
         company: company.name || "Unknown organization",
-        campaign: campaign.name || "IKF Reach",
+        campaign: campaign.name || "IKF Spark",
         subject: item.subject,
         html: cleanupUnresolvedHtml(item.html_body),
         status: item.status,
@@ -611,8 +666,9 @@ export async function GET(req: NextRequest) {
     if (!availableSenders.length && sender.email) availableSenders = [{ ...sender, active: brevo }];
     return NextResponse.json({
       ok: true,
-      canManage: canManage(req),
-      operator: actor(req) || null,
+      canManage: await canManage(req, userStatus),
+      userStatus: userStatus,
+      operator: actor(req) || userStatus.email || null,
       providers: { database: true, brevo },
       queue,
       jobs: backgroundJobs,
@@ -631,17 +687,22 @@ export async function GET(req: NextRequest) {
       scheduling: { provider: "Brevo", timezone: "Asia/Kolkata", maximumHoursAhead: 72 },
     });
   } catch (error) {
-    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to load controls" }, { status: 500 });
+    let userStatus: Awaited<ReturnType<typeof getUserStatus>> = { email: null, status: null, role: null };
+    try {
+      userStatus = await getUserStatus(req);
+    } catch {}
+    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to load controls", userStatus }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const internalWorker = body.action === "process_background_campaign" &&
-      /^[0-9a-f-]{36}$/i.test(String(body.jobId || "")) &&
-      req.headers.get("x-ikf-background-job") === String(body.jobId);
-    if (!canManage(req) && !internalWorker) {
+    const internalWorker = isBackgroundWorker(req);
+    const userStatus = await getUserStatus(req);
+    const hasManagementAccess = await canManage(req, userStatus);
+
+    if (!hasManagementAccess && !internalWorker) {
       return NextResponse.json(
         { ok: false, error: "Sign in with an authorized IKF account to manage or send emails." },
         { status: 403 },
@@ -652,7 +713,7 @@ export async function POST(req: NextRequest) {
     if (body.action === "queue_background_campaign") {
       const topic = String(body.topic || "").trim();
       const campaignName = cleanCampaignName(body.campaignName);
-      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Reach topic that every personalized email should cover." }, { status: 400 });
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Spark topic that every personalized email should cover." }, { status: 400 });
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
       let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
       try {
@@ -920,7 +981,7 @@ export async function POST(req: NextRequest) {
 
     if (body.action === "research_batch") {
       const topic = String(body.topic || "").trim();
-      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Reach topic that every personalized email should cover." }, { status: 400 });
+      if (!topic) return NextResponse.json({ ok: false, error: "Add the IKF Spark topic that every personalized email should cover." }, { status: 400 });
       const campaignName = cleanCampaignName(body.campaignName);
       if (!campaignName) return NextResponse.json({ ok: false, error: "Add a campaign name so this set of drafts stays organized." }, { status: 400 });
       let submittedTemplate: ReturnType<typeof prepareSubmittedEmailTemplate>;
@@ -2602,7 +2663,7 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   const researchData = {
     brief: String(input.brief || ""),
     topic: String(input.topic || "AI Native Thinking Masterclass"),
-    campaign_name: cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Reach",
+    campaign_name: cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Spark",
     template_provided: Boolean(String(input.emailTemplate || "").trim()),
     source: input.source || "dashboard",
     requested_by: user,
@@ -2647,9 +2708,9 @@ async function createDraftRecord(input: Record<string, any>, user: string) {
   // before any personalized draft is created. Invalid contacts remain stored
   // for correction in the quarantine view but cannot enter a campaign.
   await validateContactBeforeDraft(String(contact.id), email);
-  const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Reach";
+  const campaignName = cleanCampaignName(input.campaignName) || "AI Leadership Masterclass IKF Spark";
   const campaign = await ensureCampaign(campaignName, "");
-  if (!campaign) throw new Error("No IKF Reach campaign is configured.");
+  if (!campaign) throw new Error("No IKF Spark campaign is configured.");
   const existing = await db(`generated_emails?select=*&contact_id=eq.${contact.id}&campaign_id=eq.${campaign.id}&order=version.desc&limit=1`);
   if (input.skipExistingCampaignContact && existing[0]) {
     return { draft: existing[0], company, contact, research, skipped: true };
@@ -2833,7 +2894,7 @@ async function fetchWithTimeout(url: string, expectedSiteHost: string) {
         redirect: "manual",
         signal: controller.signal,
         headers: {
-          "User-Agent": "IKF-Reach-Research/2.0 (+https://www.ikf.co.in)",
+          "User-Agent": "IKF-Spark-Research/2.0 (+https://www.ikf.co.in)",
           Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
         },
       });
@@ -3252,7 +3313,7 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
       htmlContent,
       ...(scheduledAt ? { scheduledAt } : {}),
       ...(Object.keys(unsubscribeHeaders).length ? { headers: unsubscribeHeaders } : {}),
-      tags: ["ikf-reach", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
+      tags: ["ikf-spark", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();
@@ -3282,7 +3343,7 @@ async function submitTestBrevo(mail: Record<string, any>, testRecipient: string,
       subject: `[TEST PREVIEW] ${mail.subject}`,
       htmlContent: `${previewBanner}${htmlContent}`,
       ...(Object.keys(unsubscribeHeaders).length ? { headers: unsubscribeHeaders } : {}),
-      tags: ["ikf-reach", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
+      tags: ["ikf-spark", "test-preview", mail.campaign_id ? `campaign-${mail.campaign_id}` : "campaign-unassigned"],
     }),
   });
   const result = await response.json();

@@ -60,6 +60,6 @@ async function tickScheduledValidation(port) {
 }
 
 const { port } = await startProdServer();
-console.log(`[ikf-reach] production server listening on port ${port}`);
+console.log(`[ikf-spark] production server listening on port ${port}`);
 
 setInterval(() => tickScheduledValidation(port), CRON_INTERVAL_MS);
