@@ -40,7 +40,7 @@ function preserveSelectionOnMouseDown(event: React.MouseEvent) {
 export default function RichEmailEditor({ value, onChange, disabled = false }: RichEmailEditorProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const savedSelectionRef = useRef<Range | null>(null);
-  const lastEmitted = useRef(value);
+  const lastEmitted = useRef<string | null>(null);
   const [fontFamily, setFontFamily] = useState("Calibri");
   const [fontSize, setFontSize] = useState("11");
   const [linkPromptOpen, setLinkPromptOpen] = useState(false);
@@ -314,7 +314,6 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
           onBlur={emitChange}
           onPaste={handlePaste}
           onKeyDown={handleEditorKeyDown}
-          dangerouslySetInnerHTML={{ __html: value }}
         />
       ) : (
         <div className="editor-compact-preview">
