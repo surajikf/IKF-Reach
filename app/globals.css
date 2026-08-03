@@ -158,7 +158,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 /* Sidebar Collapse Animations & Styles */
 .app-shell { transition: grid-template-columns 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 .app-shell.sidebar-is-collapsed { grid-template-columns: 82px minmax(0, 1fr); }
-.app-shell.sidebar-is-collapsed .sidebar-brand-row { justify-content: center; }
+.app-shell.sidebar-is-collapsed .sidebar-brand-row { justify-content: center; margin-bottom: 24px; }
 /* Expanding uses the always-visible topbar hamburger (below) instead, so the
    in-rail button doesn't need to duplicate it as a second hover-revealed
    "expand" control competing for the same spot. */

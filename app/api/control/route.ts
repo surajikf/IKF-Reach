@@ -47,6 +47,12 @@ function isLocalRequest(req: NextRequest) {
   return host.includes("localhost") || host.includes("127.0.0.1");
 }
 
+function isBackgroundWorker(req: NextRequest) {
+  const expected = process.env.SUPABASE_SECRET_KEY || "";
+  const token = req.headers.get("x-ikf-background-token") || "";
+  return Boolean(expected) && token === expected;
+}
+
 import { verifyEmailCookie } from "../auth/utils";
 
 async function getUserStatus(req: NextRequest) {
