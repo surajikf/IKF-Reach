@@ -1,6 +1,7 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { getManagementAccess } from "../../../lib/manage-access";
 import { replyZohoMessage, sendZohoMessage } from "../../../lib/zoho";
+import { saveZohoThread } from "../../../lib/followups";
 
 export const dynamic = "force-dynamic";
 
@@ -38,12 +39,20 @@ export async function POST(request: NextRequest) {
   try {
     if (action === "send") {
       const result = await sendZohoMessage({ toAddress, subject, html, fromAddress });
+      const campaignId = text(body.campaignId, 100);
+      if (campaignId && result.messageId) {
+        await saveZohoThread({ campaignId, generatedEmailId: text(body.generatedEmailId, 100) || null, recipientEmail: toAddress, subject, messageId: result.messageId, direction: "outbound", sentAt: new Date().toISOString() });
+      }
       return NextResponse.json({ ok: true, action, messageId: result.messageId, payload: result.payload });
     }
 
     const messageId = text(body.messageId, 500);
     if (!messageId) return NextResponse.json({ ok: false, error: "The original Zoho message ID is required for a reply." }, { status: 400 });
     const result = await replyZohoMessage({ messageId, toAddress, subject, html, fromAddress });
+    const campaignId = text(body.campaignId, 100);
+    if (campaignId && result.messageId) {
+      await saveZohoThread({ campaignId, generatedEmailId: text(body.generatedEmailId, 100) || null, recipientEmail: toAddress, subject, messageId: result.messageId, direction: "outbound", sentAt: new Date().toISOString() });
+    }
     return NextResponse.json({ ok: true, action, messageId: result.messageId, payload: result.payload });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Zoho Mail request failed." }, { status: 502 });

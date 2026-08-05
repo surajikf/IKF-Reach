@@ -166,3 +166,102 @@ export const appUsers = sqliteTable("app_users", {
   role: text("role").notNull().default("user"), // user, admin
   createdAt: text("created_at").notNull(),
 });
+
+export const zohoThreadMessages = sqliteTable("zoho_thread_messages", {
+  id: text("id").primaryKey(),
+  campaignId: text("campaign_id").notNull(),
+  generatedEmailId: text("generated_email_id"),
+  emailSendId: text("email_send_id"),
+  recipientEmail: text("recipient_email").notNull(),
+  subject: text("subject").notNull(),
+  zohoMessageId: text("zoho_message_id").notNull(),
+  originalZohoMessageId: text("original_zoho_message_id"),
+  latestZohoMessageId: text("latest_zoho_message_id"),
+  zohoThreadId: text("zoho_thread_id"),
+  direction: text("direction").notNull().default("outbound"),
+  replied: integer("replied").notNull().default(0),
+  sentAt: text("sent_at"),
+  lastSyncedAt: text("last_synced_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("zoho_thread_messages_campaign_recipient_uidx").on(table.campaignId, table.recipientEmail),
+  index("zoho_thread_messages_message_idx").on(table.zohoMessageId),
+]);
+
+export const followupSequences = sqliteTable("followup_sequences", {
+  id: text("id").primaryKey(),
+  campaignId: text("campaign_id").notNull(),
+  campaignName: text("campaign_name").notNull(),
+  name: text("name").notNull(),
+  status: text("status").notNull().default("draft"),
+  mode: text("mode").notNull().default("reply_thread"),
+  excludeReplied: integer("exclude_replied").notNull().default(1),
+  totalRecipients: integer("total_recipients").notNull().default(0),
+  eligibleRecipients: integer("eligible_recipients").notNull().default(0),
+  excludedRecipients: integer("excluded_recipients").notNull().default(0),
+  sentCount: integer("sent_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  cancelRequested: integer("cancel_requested").notNull().default(0),
+  scheduledFor: text("scheduled_for"),
+  createdBy: text("created_by").notNull(),
+  approvedAt: text("approved_at"),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("followup_sequences_campaign_idx").on(table.campaignId),
+  index("followup_sequences_status_idx").on(table.status),
+  index("followup_sequences_schedule_idx").on(table.scheduledFor),
+]);
+
+export const followupStages = sqliteTable("followup_stages", {
+  id: text("id").primaryKey(),
+  sequenceId: text("sequence_id").notNull(),
+  position: integer("position").notNull(),
+  subject: text("subject").notNull(),
+  htmlTemplate: text("html_template").notNull(),
+  delayMinutes: integer("delay_minutes").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("followup_stages_sequence_position_uidx").on(table.sequenceId, table.position),
+]);
+
+export const followupRecipients = sqliteTable("followup_recipients", {
+  id: text("id").primaryKey(),
+  sequenceId: text("sequence_id").notNull(),
+  generatedEmailId: text("generated_email_id"),
+  contactId: text("contact_id"),
+  recipientEmail: text("recipient_email").notNull(),
+  companyName: text("company_name"),
+  contactName: text("contact_name"),
+  originalSubject: text("original_subject").notNull(),
+  zohoMessageId: text("zoho_message_id"),
+  status: text("status").notNull().default("eligible"),
+  exclusionReason: text("exclusion_reason"),
+  currentStage: integer("current_stage").notNull().default(0),
+  nextRunAt: text("next_run_at"),
+  lastError: text("last_error"),
+  replied: integer("replied").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("followup_recipients_sequence_email_uidx").on(table.sequenceId, table.recipientEmail),
+  index("followup_recipients_due_idx").on(table.status, table.nextRunAt),
+]);
+
+export const followupEvents = sqliteTable("followup_events", {
+  id: text("id").primaryKey(),
+  sequenceId: text("sequence_id").notNull(),
+  recipientId: text("recipient_id"),
+  stagePosition: integer("stage_position"),
+  event: text("event").notNull(),
+  detail: text("detail"),
+  messageId: text("message_id"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("followup_events_sequence_idx").on(table.sequenceId),
+  index("followup_events_recipient_idx").on(table.recipientId),
+]);

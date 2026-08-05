@@ -59,7 +59,19 @@ async function tickScheduledValidation(port) {
   }
 }
 
+async function tickScheduledFollowups(port) {
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    // The protected worker owns the due-sequence check. Calling it directly
+    // keeps scheduled follow-ups independent from interactive dashboard auth.
+    await fetch(`${base}/api/background-followups`, { method: "POST", headers: { "Content-Type": "application/json", "x-ikf-followup-token": process.env.SUPABASE_SECRET_KEY || "" }, body: "{}" });
+  } catch {
+    // Best-effort heartbeat; due replies are retried on the next interval.
+  }
+}
+
 const { port } = await startProdServer();
 console.log(`[ikf-spark] production server listening on port ${port}`);
 
-setInterval(() => tickScheduledValidation(port), CRON_INTERVAL_MS);
+setInterval(() => { tickScheduledValidation(port); tickScheduledFollowups(port); }, CRON_INTERVAL_MS);
+tickScheduledFollowups(port);

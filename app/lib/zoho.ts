@@ -318,6 +318,102 @@ async function zohoMessageRequest(path: string, body: Record<string, unknown>) {
   return { payload, messageId: zohoMessageId(payload) };
 }
 
+export type ZohoMessageSummary = {
+  messageId: string;
+  threadId: string | null;
+  folderId: string | null;
+  fromAddress: string;
+  toAddress: string;
+  subject: string;
+  receivedAt: string | null;
+  sentAt: string | null;
+};
+
+export async function searchZohoMessages(searchKey: string, limit = 25) {
+  const connection = await getValidZohoAccessToken();
+  const query = new URLSearchParams({
+    searchKey,
+    start: "1",
+    limit: String(Math.max(1, Math.min(200, limit))),
+    includeto: "true",
+    receivedTime: String(Date.now()),
+  });
+  const response = await fetch(
+    `${connection.apiBase}/accounts/${encodeURIComponent(connection.accountId)}/messages/search?${query}`,
+    {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${connection.accessToken}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    },
+  );
+  const payload = await response.json() as { data?: Array<Record<string, unknown>>; message?: string };
+  if (!response.ok) throw new Error(payload.message || `Zoho Mail search failed (${response.status}).`);
+  return (payload.data || []).map((item): ZohoMessageSummary => ({
+    messageId: String(item.messageId || item.id || ""),
+    threadId: item.threadId == null ? null : String(item.threadId),
+    folderId: item.folderId == null ? null : String(item.folderId),
+    fromAddress: String(item.fromAddress || "").toLowerCase(),
+    toAddress: String(item.toAddress || "").toLowerCase(),
+    subject: String(item.subject || ""),
+    receivedAt: item.receivedTime || item.receivedtime
+      ? new Date(Number(item.receivedTime || item.receivedtime)).toISOString()
+      : null,
+    sentAt: item.sentDateInGMT
+      ? new Date(Number(item.sentDateInGMT) * (Number(item.sentDateInGMT) < 10_000_000_000 ? 1000 : 1)).toISOString()
+      : null,
+  })).filter((item) => item.messageId);
+}
+
+export async function getZohoMessageContent(input: { messageId: string; folderId: string }) {
+  const connection = await getValidZohoAccessToken();
+  const response = await fetch(
+    `${connection.apiBase}/accounts/${encodeURIComponent(connection.accountId)}/folders/${encodeURIComponent(input.folderId)}/messages/${encodeURIComponent(input.messageId)}/content?includeBlockContent=true`,
+    {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${connection.accessToken}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    },
+  );
+  const payload = await response.json() as { data?: { content?: string }; message?: string };
+  if (!response.ok) throw new Error(payload.message || `Zoho Mail content lookup failed (${response.status}).`);
+  return String(payload.data?.content || "");
+}
+
+function normalizedSubject(value: string) {
+  return String(value || "").replace(/^(?:re|fw|fwd):\s*/gi, "").trim().toLowerCase();
+}
+
+export async function findZohoThreadAnchor(input: {
+  recipientEmail: string;
+  subject?: string;
+}) {
+  const email = input.recipientEmail.trim().toLowerCase();
+  if (!email) return null;
+  const expectedSubject = normalizedSubject(input.subject || "");
+  const searches = await Promise.all([
+    searchZohoMessages(`from:${email}`, 30).catch(() => []),
+    searchZohoMessages(`to:${email}`, 30).catch(() => []),
+  ]);
+  const candidates = searches.flat().filter((message) => {
+    if (!expectedSubject) return true;
+    const actual = normalizedSubject(message.subject);
+    return actual === expectedSubject || actual.includes(expectedSubject) || expectedSubject.includes(actual);
+  });
+  candidates.sort((a, b) => {
+    const aInbound = a.fromAddress.includes(email) ? 1 : 0;
+    const bInbound = b.fromAddress.includes(email) ? 1 : 0;
+    if (aInbound !== bInbound) return bInbound - aInbound;
+    return new Date(b.receivedAt || b.sentAt || 0).getTime() - new Date(a.receivedAt || a.sentAt || 0).getTime();
+  });
+  const match = candidates[0];
+  if (!match) return null;
+  return { ...match, replied: match.fromAddress.includes(email) };
+}
+
 export async function sendZohoMessage(input: {
   toAddress: string;
   subject: string;

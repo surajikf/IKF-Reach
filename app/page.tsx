@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import data from "./dashboard-data.json";
 import RichEmailEditor from "./rich-email-editor";
+import FollowupWorkspace from "./followup-workspace";
 import StatisticsDashboard from "./statistics-dashboard";
 import { inferContactName } from "./lib/name";
 import { buildCampaignSchedule } from "./lib/schedule";
 
 type Section = "overview" | "create" | "campaigns" | "statistics" | "emails" | "queue" | "contacts" | "companies" | "settings" | "activity";
-type CampaignWorkspaceView = "overview" | "emails" | "delivery";
+type CampaignWorkspaceView = "overview" | "emails" | "delivery" | "followups";
 type EmailRecord = { id: string; contactId?: string | null; company: string; recipient: string; subject: string; campaign: string; html: string; status: string; sendStatus?: string | null; version: number; generatedAt: string };
 type ContactRecord = { id: string; companyId?: string | null; name?: string | null; email: string; role?: string | null; confidence?: string | null; company: string; industry?: string | null; companyWebsite?: string | null; companyCountry?: string | null; createdAt?: string | null; unsubscribed?: boolean };
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
@@ -533,6 +534,10 @@ export default function Home() {
   useEffect(() => {
     if (section === "settings" && settingsView === "connections") loadZohoStatus();
   }, [section, settingsView]);
+
+  useEffect(() => {
+    if (section === "campaigns" && campaignWorkspaceView === "followups") loadZohoStatus();
+  }, [section, campaignWorkspaceView]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -2059,6 +2064,7 @@ export default function Home() {
                   <button className={campaignWorkspaceView === "overview" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "overview"} onClick={() => { setCampaignWorkspaceView("overview"); setPage(1); }}>Overview</button>
                   <button className={campaignWorkspaceView === "emails" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "emails"} onClick={() => { setCampaignWorkspaceView("emails"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Emails <span>{selectedCampaignSummary?.total || 0}</span></button>
                   <button className={campaignWorkspaceView === "delivery" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "delivery"} onClick={() => { setCampaignWorkspaceView("delivery"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Approval & delivery</button>
+                  <button className={campaignWorkspaceView === "followups" ? "active" : ""} role="tab" aria-selected={campaignWorkspaceView === "followups"} onClick={() => { setCampaignWorkspaceView("followups"); setSelectedIds(new Set()); setBulkMode(null); setPage(1); }}>Follow-ups</button>
                 </div>
               </article>}
 
@@ -2163,6 +2169,7 @@ export default function Home() {
                     <div className="campaign-detail-actions">
                       <button onClick={() => openCampaignWorkspace("emails", selectedCampaignSummary.name)}>Review emails</button>
                       <button className="primary-action" onClick={() => openCampaignWorkspace("delivery", selectedCampaignSummary.name)}>{selectedCampaignSummary.scheduled || selectedCampaignSummary.sent ? "Continue campaign" : "Approve, schedule, or send"}</button>
+                      {selectedCampaignSummary.sent > 0 && <button className="followup-action" onClick={() => openCampaignWorkspace("followups", selectedCampaignSummary.name)}>Create follow-up</button>}
                       {selectedCampaignSummary.scheduled > 0 && <button className="danger-action" disabled={working || !control?.canManage} onClick={abortSelectedCampaignDelivery}>{working ? "Stopping…" : "Stop remaining scheduled emails"}</button>}
                     </div>
 
@@ -2238,6 +2245,17 @@ export default function Home() {
                   <EmailTable rows={pagedCampaignEmails} onOpen={setSelectedEmail} selected={selectedIds} onSelect={toggleSelected} onDelete={deleteCampaignEmail} deletingDisabled={working || !control?.canManage} unsubscribedEmails={unsubscribedEmails} />
                   <div className="pagination"><span>Page {page} of {campaignEmailPages}</span><div><button disabled={page === 1} onClick={() => setPage((current) => current - 1)}>Previous</button><button disabled={page === campaignEmailPages} onClick={() => setPage((current) => current + 1)}>Next</button></div></div>
                 </section>
+              )}
+
+              {campaignDetailOpen && campaignWorkspaceView === "followups" && selectedCampaignSummary && (
+                <FollowupWorkspace
+                  campaign={{ id: selectedCampaignSummary.id, name: selectedCampaignSummary.name, sent: selectedCampaignSummary.sent }}
+                  canManage={Boolean(control?.canManage)}
+                  zohoConnected={Boolean(zohoStatus?.connected)}
+                  apiFetch={apiFetch}
+                  onOpenControls={() => { setSettingsView("connections"); switchSection("settings"); }}
+                  notify={showToast}
+                />
               )}
 
               {campaignDetailOpen && campaignWorkspaceView === "delivery" && selectedCampaign && (
