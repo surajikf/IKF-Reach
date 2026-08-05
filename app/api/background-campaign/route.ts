@@ -1,7 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb } from "../../../db";
+import { verifyEmailCookie } from "../auth/utils";
 
 export const dynamic = "force-dynamic";
+
+const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
+
+function isLocalRequest(req: NextRequest) {
+  const host = (req.headers.get("host") || "").toLowerCase();
+  return host.includes("localhost") || host.includes("127.0.0.1");
+}
+
+function actor(req: NextRequest) {
+  return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
+}
+
+async function canRunWorker(req: NextRequest, jobId: string) {
+  const secret = process.env.SUPABASE_SECRET_KEY || "";
+  const suppliedToken = req.headers.get("x-ikf-background-token") || "";
+  const suppliedJob = req.headers.get("x-ikf-background-job") || "";
+  if (suppliedJob === jobId && secret && suppliedToken === secret) return true;
+  if (isLocalRequest(req) || allowedOperators.has(actor(req))) return true;
+  const accessKey = process.env.IKF_ACCESS_KEY || process.env.NEXT_PUBLIC_TEAM_ACCESS_KEY || "";
+  if (accessKey && req.headers.get("x-ikf-access-key") === accessKey) return true;
+  const email = verifyEmailCookie(req.cookies.get("ikf_auth")?.value)?.toLowerCase();
+  if (!email) return false;
+  if (email === "suraj.sonnar@ikf.co.in") return true;
+  const user = await getQueueDb().prepare("SELECT status FROM app_users WHERE email = ?").bind(email).first<{ status: string }>();
+  return user?.status === "approved";
+}
 
 async function runBackgroundCampaignBatch(
   requestUrl: string,
@@ -48,6 +75,9 @@ export async function POST(req: NextRequest) {
   const jobId = String(body.jobId || "");
   if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
     return NextResponse.json({ ok: false, error: "A valid campaign job is required." }, { status: 400 });
+  }
+  if (!(await canRunWorker(req, jobId))) {
+    return NextResponse.json({ ok: false, error: "Unauthorized background campaign request." }, { status: 403 });
   }
 
   const queueDb = getQueueDb();

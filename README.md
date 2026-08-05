@@ -16,6 +16,21 @@ npm run dev
 npm run build
 ```
 
+## Zoho Mail connection
+
+IKF Spark can connect the Tanishka mailbox through Zoho OAuth so later follow-ups can be sent as replies in the original email thread. Keep these values in the server environment (never in browser-exposed `NEXT_PUBLIC_*` variables):
+
+```env
+ZOHO_CLIENT_ID=your_zoho_client_id
+ZOHO_CLIENT_SECRET=your_zoho_client_secret
+ZOHO_REDIRECT_URI=https://spark.ikf.in/api/auth/zoho/callback
+ZOHO_MAILBOX_EMAIL=tanishka@iknowai.in
+# Optional. If omitted, SUPABASE_SECRET_KEY is used to derive the token-encryption key.
+ZOHO_TOKEN_ENCRYPTION_KEY=a-long-random-server-only-secret
+```
+
+The Zoho API Console redirect URI must match `ZOHO_REDIRECT_URI` exactly. After deployment, open **Controls & APIs → Connections** and choose **Connect Zoho Mail**. OAuth access and refresh tokens are encrypted before they are saved in the existing `outreach_settings` store.
+
 This starter does not use `wrangler.jsonc`.
 
 ## Included Shape

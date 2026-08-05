@@ -12,6 +12,10 @@ const backgroundCampaignApi = await readFile(new URL("../app/api/background-camp
 const statistics = await readFile(new URL("../app/statistics-dashboard.tsx", import.meta.url), "utf8");
 const statisticsApi = await readFile(new URL("../app/api/statistics/route.ts", import.meta.url), "utf8");
 const webhookApi = await readFile(new URL("../app/api/brevo-webhook/route.ts", import.meta.url), "utf8");
+const zoho = await readFile(new URL("../app/lib/zoho.ts", import.meta.url), "utf8");
+const zohoAuth = await readFile(new URL("../app/api/auth/zoho/route.ts", import.meta.url), "utf8");
+const zohoCallback = await readFile(new URL("../app/api/auth/zoho/callback/route.ts", import.meta.url), "utf8");
+const zohoStatus = await readFile(new URL("../app/api/zoho/status/route.ts", import.meta.url), "utf8");
 
 test("campaign creation exposes durable background research and verified sender selection", () => {
   // Matched on function calls / class names here rather than visible copy —
@@ -26,7 +30,7 @@ test("campaign creation exposes durable background research and verified sender 
 test("server queues campaign sources and processes them in bounded batches", () => {
   assert.match(api, /queue_background_campaign/);
   assert.match(api, /process_background_campaign/);
-  assert.match(api, /const batchLimit = estimatedRemaining > 200 \? 50 : estimatedRemaining > 50 \? 20 : 1/);
+  assert.match(api, /const batchLimit = Math\.min\(50, Math\.max\(1, estimatedRemaining\)\)/);
   assert.match(api, /now\.getTime\(\) - 45_000/);
   assert.match(api, /status = 'failed' AND attempts < 2/);
   assert.match(api, /skipDomainResearch: Number\(item\.attempts \|\| 0\) >= 2/);
@@ -268,4 +272,40 @@ test("empty live datasets do not resurrect deleted snapshot campaigns or emails"
   assert.match(page, /Array\.isArray\(control\?\.liveEmails\)/);
   assert.match(page, /Array\.isArray\(control\?\.liveContacts\)/);
   assert.match(page, /Array\.isArray\(control\?\.liveCompanies\)/);
+});
+
+test("Zoho Mail OAuth uses the India data center and protects offline credentials", () => {
+  assert.match(zoho, /https:\/\/accounts\.zoho\.in/);
+  assert.match(zoho, /https:\/\/mail\.zoho\.in\/api/);
+  assert.match(zoho, /ZohoMail\.accounts\.READ,ZohoMail\.messages\.ALL/);
+  assert.match(zoho, /createCipheriv\("aes-256-gcm"/);
+  assert.match(zoho, /createDecipheriv\("aes-256-gcm"/);
+  assert.match(zoho, /ZOHO_TOKEN_ENCRYPTION_KEY/);
+  assert.match(zoho, /zoho_oauth/);
+  assert.doesNotMatch(zoho, /NEXT_PUBLIC_ZOHO/);
+});
+
+test("Zoho OAuth validates its session and persists the connected mailbox safely", () => {
+  assert.match(zohoAuth, /randomBytes\(32\)/);
+  assert.match(zohoAuth, /access_type", "offline"/);
+  assert.match(zohoAuth, /prompt", "consent"/);
+  assert.match(zohoAuth, /zoho_oauth_state/);
+  assert.match(zohoAuth, /httpOnly: true/);
+  assert.match(zohoCallback, /safeStateMatch/);
+  assert.match(zohoCallback, /timingSafeEqual/);
+  assert.match(zohoCallback, /exchangeZohoAuthorizationCode/);
+  assert.match(zohoCallback, /resolveZohoMailAccount/);
+  assert.match(zohoCallback, /saveZohoConnection/);
+  assert.match(zohoCallback, /getZohoRedirectUri\(request\)/);
+});
+
+test("approved operators can inspect and disconnect Zoho Mail from the controls page", () => {
+  assert.match(zohoStatus, /getManagementAccess/);
+  assert.match(zohoStatus, /getZohoConnectionStatus/);
+  assert.match(zohoStatus, /export async function DELETE/);
+  assert.match(zohoStatus, /disconnectZoho/);
+  assert.match(page, /Zoho Mail threading/);
+  assert.match(page, /href=\{zohoStatus\?\.configured \? "\/api\/auth\/zoho"/);
+  assert.match(page, />Connect<\/a>/);
+  assert.match(page, /Disconnect Zoho/);
 });

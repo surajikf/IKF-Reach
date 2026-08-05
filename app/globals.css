@@ -657,12 +657,17 @@ tbody tr:hover, tbody tr:focus { background: #f6f5ff; }
 .settings-section-heading p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 14px; }
 .settings-section-heading > button { min-height: 44px; padding-inline: 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font-weight: 800; }
 .settings-number { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border-radius: 11px; background: var(--accent-soft); color: var(--accent); font-size: 15px; font-weight: 900; }
-.connection-cards { padding: 20px 24px 24px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.connection-cards { padding: 20px 24px 24px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .connection-cards > div { min-width: 0; min-height: 94px; padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: #fafbfc; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
 .connection-cards > div > div { min-width: 0; display: grid; gap: 4px; }
 .connection-cards strong { font-size: 15px; }
 .connection-cards small { color: var(--muted); line-height: 1.35; }
 .connection-cards > div > b { color: #257d61; font-size: 13px; }
+.connection-actions { display: flex !important; align-items: center; justify-content: flex-end; }
+.connection-actions a, .connection-actions button { min-height: 38px; padding: 8px 12px; border: 1px solid #c9c4f5; border-radius: 9px; background: #fff; color: var(--accent); font: inherit; font-size: 13px; font-weight: 800; text-decoration: none; cursor: pointer; }
+.connection-actions button { border-color: #edb8bf; color: #b42334; }
+.connection-actions .disabled { border-color: var(--line); color: #9aa2af; pointer-events: none; }
+.connection-error { color: #b42334 !important; }
 .identity-avatar { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: #6257e8; color: #fff; font-weight: 900; }
 .sending-flow { list-style: none; margin: 0; padding: 24px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .sending-flow li { position: relative; min-height: 170px; padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: #fafbfc; display: grid; align-content: start; gap: 14px; }
@@ -3854,7 +3859,6 @@ button, .primary-action, .quiet-action, .text-button, .refresh-button { min-heig
 .modern-company-table tr:hover td {
   background: #f8fafc !important;
 }
-
 
 
 

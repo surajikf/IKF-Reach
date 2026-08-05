@@ -243,9 +243,10 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: "Schedule validation at least 1 minute from now, or choose Run now." }, { status: 400 });
       }
 
-      const hasRequestedIds = Array.isArray(body.contactIds);
-      const requestedIds = hasRequestedIds
-        ? body.contactIds.map(String).filter((value) => /^[0-9a-f-]{36}$/i.test(value))
+      const rawContactIds = Array.isArray(body.contactIds) ? body.contactIds : null;
+      const hasRequestedIds = rawContactIds !== null;
+      const requestedIds = rawContactIds
+        ? rawContactIds.map((value: unknown) => String(value)).filter((value: string) => /^[0-9a-f-]{36}$/i.test(value))
         : [];
       if (hasRequestedIds && !requestedIds.length) {
         return NextResponse.json({ ok: false, error: "Choose at least one valid contact to validate." }, { status: 400 });

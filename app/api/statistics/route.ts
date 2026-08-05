@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getQueueDb } from "../../../db";
+import { verifyEmailCookie } from "../auth/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,28 @@ const singleOccurrenceEvents = new Set([
   "sent", "scheduled", "delivered", "deferred", "softBounce", "hardBounce",
   "blocked", "invalid", "error", "spam", "unsubscribed",
 ]);
+
+const allowedOperators = new Set(["gpt@ikf.co.in", "social@ikf.co.in"]);
+
+function isLocalRequest(req: NextRequest) {
+  const host = (req.headers.get("host") || "").toLowerCase();
+  return host.includes("localhost") || host.includes("127.0.0.1");
+}
+
+function actor(req: NextRequest) {
+  return req.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() || "";
+}
+
+async function canViewStatistics(req: NextRequest) {
+  if (isLocalRequest(req) || allowedOperators.has(actor(req))) return true;
+  const accessKey = process.env.IKF_ACCESS_KEY || process.env.NEXT_PUBLIC_TEAM_ACCESS_KEY || "";
+  if (accessKey && req.headers.get("x-ikf-access-key") === accessKey) return true;
+  const email = verifyEmailCookie(req.cookies.get("ikf_auth")?.value)?.toLowerCase();
+  if (!email) return false;
+  if (email === "suraj.sonnar@ikf.co.in") return true;
+  const user = await getQueueDb().prepare("SELECT status FROM app_users WHERE email = ?").bind(email).first<{ status: string }>();
+  return user?.status === "approved";
+}
 
 function canonicalEventKey(event: AnalyticsEvent) {
   if (event.messageId && singleOccurrenceEvents.has(event.event)) {
@@ -146,6 +169,9 @@ function parseRange(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   try {
+    if (!(await canViewStatistics(req))) {
+      return NextResponse.json({ ok: false, error: "Sign in with an approved IKF account to view statistics." }, { status: 403 });
+    }
     const { startDate, endDate, start, end } = parseRange(req);
     const [campaigns, generatedEmails, contacts, sends, storedResult] = await Promise.all([
       fetchAllRows("campaigns?select=id,name,status,sender_name,sender_email,created_at&order=created_at.desc", 5000),
@@ -159,13 +185,18 @@ export async function GET(req: NextRequest) {
         LIMIT 10000
       `).bind(start.toISOString(), end.toISOString()).all(),
     ]);
+    const campaignRows = campaigns as Array<Record<string, unknown>>;
+    const generatedEmailRows = generatedEmails as Array<Record<string, unknown>>;
+    const contactRows = contacts as Array<Record<string, unknown>>;
+    const sendRows = sends as Array<Record<string, unknown>>;
+    const storedRows = ((storedResult as { results?: unknown[] }).results || []) as Array<Record<string, unknown>>;
 
-    const campaignById = new Map(campaigns.map((campaign: Record<string, unknown>) => [String(campaign.id), campaign]));
-    const generatedById = new Map(generatedEmails.map((email: Record<string, unknown>) => [String(email.id), email]));
-    const contactById = new Map(contacts.map((contact: Record<string, unknown>) => [String(contact.id), contact]));
+    const campaignById = new Map(campaignRows.map((campaign) => [String(campaign.id), campaign]));
+    const generatedById = new Map(generatedEmailRows.map((email) => [String(email.id), email]));
+    const contactById = new Map(contactRows.map((contact) => [String(contact.id), contact]));
     const sendByMessage = new Map<string, Record<string, unknown>>();
     const sendById = new Map<string, Record<string, unknown>>();
-    for (const send of sends) {
+    for (const send of sendRows) {
       sendById.set(String(send.id), send);
       const messageId = normalizeMessageId(send.brevo_message_id);
       if (messageId) sendByMessage.set(messageId, send);
@@ -209,7 +240,7 @@ export async function GET(req: NextRequest) {
       addEvent(events, event);
     }
 
-    for (const row of (storedResult.results || []) as Array<Record<string, unknown>>) {
+    for (const row of storedRows) {
       const messageId = normalizeMessageId(row.message_id);
       const send = sendByMessage.get(messageId) || sendById.get(String(row.email_send_id || ""));
       if (!send) continue;
@@ -237,7 +268,7 @@ export async function GET(req: NextRequest) {
       addEvent(events, event);
     }
 
-    for (const send of sends) {
+    for (const send of sendRows) {
       const sentDate = safeDate(send.sent_at || send.created_at);
       if (sentDate < start.toISOString() || sentDate > end.toISOString()) continue;
       if (!["sent", "delivered"].includes(String(send.status || "")) && !String(send.status || "").startsWith("scheduled")) continue;
@@ -271,7 +302,7 @@ export async function GET(req: NextRequest) {
       ok: true,
       range: { startDate, endDate, maximumDays: 90 },
       provider: { connected: !providerWarning, warning: providerWarning, lastSyncedAt: new Date().toISOString() },
-      campaigns: campaigns.map((campaign: Record<string, unknown>) => ({
+      campaigns: campaignRows.map((campaign) => ({
         id: campaign.id,
         name: campaign.name,
         status: campaign.status,
@@ -282,7 +313,7 @@ export async function GET(req: NextRequest) {
       events: output,
       coverage: {
         liveBrevoEvents: liveEvents.length,
-        storedWebhookEvents: (storedResult.results || []).length,
+        storedWebhookEvents: storedRows.length,
         matchedReachEvents: output.length,
       },
     });

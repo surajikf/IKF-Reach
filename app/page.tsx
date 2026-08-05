@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import data from "./dashboard-data.json";
-import StatisticsDashboard from "./statistics-dashboard";
 import RichEmailEditor from "./rich-email-editor";
+import StatisticsDashboard from "./statistics-dashboard";
 import { inferContactName } from "./lib/name";
 import { buildCampaignSchedule } from "./lib/schedule";
 
@@ -14,7 +14,7 @@ type ContactRecord = { id: string; companyId?: string | null; name?: string | nu
 type CompanyRecord = { id: string; name: string; website?: string | null; industry?: string | null; country?: string | null; contacts: number; drafts: number; updatedAt?: string | null };
 type ActivityRecord = { id?: string | number; action: string; company?: string | null; email?: string | null; createdAt: string };
 type LiveStats = { companies: number; contacts: number; emails: number; pendingReview: number; approved: number; scheduled: number; sent: number; failed: number };
-type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; error?: string };
+type WebsiteScanRecord = { input: string; ok: boolean; website?: string; companyName?: string; discoveredEmails: string[]; pagesReviewed: string[]; skipped?: boolean; error?: string };
 type BackgroundJob = { id: string; campaignId: string; campaignName: string; topic?: string; emailTemplate?: string; emailTemplateFormat?: string; emailTemplateText?: string; templateVersion?: number; brief?: string; status: string; totalItems: number; completedItems: number; successfulItems: number; failedItems: number; retryItems?: number; draftsCreated: number; contactsFound: number; lastError?: string | null; createdAt: string; startedAt?: string | null; updatedAt: string };
 type ValidationVerdict = "valid" | "risky" | "invalid" | "unknown";
 type ValidationResult = { contactId: string; email: string; verdict: ValidationVerdict; score: number; syntaxValid: boolean; domainReachable: boolean | null; roleBased: boolean; disposable: boolean; previousHardBounce: boolean; previousSoftBounce: boolean; previousDelivered: boolean; complaint: boolean; unsubscribed: boolean; reasons: string[]; mxRecords: string[]; validatedAt: string };
@@ -24,6 +24,7 @@ type ControlData = {
   ok: boolean;
   canManage?: boolean;
   operator?: string | null;
+  userStatus?: { email: string | null; status: string | null; role: string | null } | null;
   providers?: { database: boolean; brevo: boolean };
   queue?: Array<Record<string, any>>;
   jobs?: Array<Record<string, any>>;
@@ -40,6 +41,17 @@ type ControlData = {
   refreshedAt?: string;
   scheduling?: { provider: string; timezone: string; maximumHoursAhead: number };
   error?: string;
+};
+type ZohoStatus = {
+  ok: boolean;
+  configured: boolean;
+  connected: boolean;
+  email: string | null;
+  accountId: string | null;
+  expiresAt: string | null;
+  connectedAt: string | null;
+  redirectUri?: string;
+  error?: string | null;
 };
 
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
@@ -365,6 +377,8 @@ export default function Home() {
   const [companyView, setCompanyView] = useState<"cards" | "table">("table");
   const [activityFilter, setActivityFilter] = useState("all");
   const [settingsView, setSettingsView] = useState<"connections" | "workflow" | "delivery" | "users">("connections");
+  const [zohoStatus, setZohoStatus] = useState<ZohoStatus | null>(null);
+  const [zohoLoading, setZohoLoading] = useState(false);
   const [appUsers, setAppUsers] = useState<any[]>([]);
 
   const loadUsers = async () => {
@@ -406,6 +420,41 @@ export default function Home() {
       setWorking(false);
     }
   };
+
+  function showToast(message: string, tone: "success" | "error" = "success") {
+    setNoticeTone(tone);
+    setNotice(message);
+  }
+
+  async function loadZohoStatus() {
+    setZohoLoading(true);
+    try {
+      const response = await apiFetch("/api/zoho/status");
+      const result = await response.json();
+      setZohoStatus(result);
+    } catch {
+      setZohoStatus({ ok: false, configured: false, connected: false, email: null, accountId: null, expiresAt: null, connectedAt: null, error: "Unable to reach the Zoho connection service." });
+    } finally {
+      setZohoLoading(false);
+    }
+  }
+
+  async function disconnectZohoMailbox() {
+    setConfirmDialog(null);
+    setWorking(true);
+    try {
+      const response = await apiFetch("/api/zoho/status", { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to disconnect Zoho Mail.");
+      await loadZohoStatus();
+      showToast("Zoho Mail was disconnected. Brevo delivery remains unchanged.");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Unable to disconnect Zoho Mail.", "error");
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const [accessBannerExpanded, setAccessBannerExpanded] = useState(false);
   const [accessKeyInput, setAccessKeyInput] = useState("");
   const [accessKeyError, setAccessKeyError] = useState("");
@@ -480,6 +529,27 @@ export default function Home() {
   }
 
   useEffect(() => { loadControl(); loadValidation(); }, []);
+
+  useEffect(() => {
+    if (section === "settings" && settingsView === "connections") loadZohoStatus();
+  }, [section, settingsView]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const zohoResult = params.get("zoho");
+    if (!zohoResult) return;
+    setSection("settings");
+    setSettingsView("connections");
+    if (zohoResult === "connected") showToast("Zoho Mail is connected and ready for threaded follow-ups.");
+    else if (zohoResult === "denied") showToast("Zoho access was not approved.", "error");
+    else if (zohoResult === "misconfigured") showToast("Zoho client credentials are not configured on this server.", "error");
+    else if (zohoResult === "invalid-state") showToast("The Zoho connection request expired. Please try again.", "error");
+    else if (zohoResult === "unauthorized") showToast("Authorized IKF access is required to connect Zoho Mail.", "error");
+    else showToast("Zoho Mail could not be connected. Please try again.", "error");
+    params.delete("zoho");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  }, []);
 
   useEffect(() => {
     const available = control?.availableSenders || [];
@@ -771,7 +841,11 @@ export default function Home() {
     senderName: String(campaign.sender_name || control.sender?.name || "Tanishka"),
     senderEmail: String(campaign.sender_email || control.sender?.email || "tanishka@iknowai.in"),
     replyToEmail: String(campaign.reply_to_email || control.replyTo || "tanishka@iknowai.in"),
-  })) : data.campaigns.map((campaign) => ({ ...campaign, id: campaign.name })), [control?.campaigns, control?.sender, displayEmails, paused]);
+  })) : data.campaigns.map((campaign) => ({
+    ...campaign,
+    id: campaign.name,
+    replyToEmail: control?.replyTo || "tanishka@iknowai.in",
+  })), [control?.campaigns, control?.sender, control?.replyTo, displayEmails, paused]);
   const selectedCampaign = displayCampaigns.find((campaign) => campaign.id === queueForm.campaignId) || displayCampaigns[0];
   const selectedCampaignEmails = selectedCampaign ? displayEmails.filter((email) => email.campaign === selectedCampaign.name) : [];
   // Contacts with a permanently invalid verdict (bad domain, no MX records, etc.) can never pass
@@ -1032,6 +1106,10 @@ export default function Home() {
       setBulkMode(null);
       setBulkForm({ scheduledFor: "", delayMinutes: 5, confirmed: false, confirmText: "", testRecipients: "" });
     }
+  }
+
+  async function runBulkTest() {
+    await runTestSend();
   }
 
   async function sendPreviewTestCopy() {
@@ -2276,6 +2354,8 @@ export default function Home() {
             </section>
           )}
 
+          {section === "statistics" && <StatisticsDashboard emails={displayEmails} />}
+
           {section === "emails" && (
             <section className="panel data-panel">
               <div className="panel-heading filters-heading">
@@ -2710,10 +2790,19 @@ export default function Home() {
               </nav>
 
               <article className={`panel settings-section ${settingsView === "connections" ? "" : "settings-section-hidden"}`}>
-                <div className="settings-section-heading"><div><span className="settings-number">1</span><div><p className="eyebrow">System readiness</p><h2>Connections and sending identity</h2><p>These services must be available before any delivery action can work.</p></div></div><button onClick={loadControl} disabled={refreshing}>{refreshing ? "Checking…" : "Check connections"}</button></div>
+                <div className="settings-section-heading"><div><span className="settings-number">1</span><div><p className="eyebrow">System readiness</p><h2>Connections and sending identity</h2><p>These services must be available before any delivery action can work.</p></div></div><button onClick={() => { loadControl(); loadZohoStatus(); }} disabled={refreshing || zohoLoading}>{refreshing || zohoLoading ? "Checking…" : "Check connections"}</button></div>
                 <div className="connection-cards">
                   <div><span className={`api-dot ${control?.providers?.database ? "online" : "offline"}`} /><div><strong>Supabase database</strong><small>Contacts, companies, campaigns, drafts, and activity</small></div><b>{control?.providers?.database ? "Connected" : "Unavailable"}</b></div>
                   <div><span className={`api-dot ${control?.providers?.brevo ? "online" : "offline"}`} /><div><strong>Brevo delivery</strong><small>Test copies, scheduled delivery, and sending</small></div><b>{control?.providers?.brevo ? "Connected" : "Unavailable"}</b></div>
+                  <div className="zoho-connection-card">
+                    <span className={`api-dot ${zohoStatus?.connected ? "online" : "offline"}`} />
+                    <div><strong>Zoho Mail threading</strong><small>{zohoLoading ? "Checking mailbox connection…" : zohoStatus?.connected ? `${zohoStatus.email || "Mailbox connected"} · replies can stay in the original thread` : zohoStatus?.configured ? "Connect Tanishka’s mailbox for reply-in-thread follow-ups" : "Add the Zoho client ID and secret to this server"}</small>{zohoStatus?.error && <small className="connection-error">{zohoStatus.error}</small>}</div>
+                    <div className="connection-actions">
+                      {zohoStatus?.connected
+                        ? <button type="button" disabled={working} onClick={() => setConfirmDialog({ message: "Disconnect Zoho Mail? Existing Brevo sending will continue, but reply-in-thread follow-ups will be unavailable until Zoho is reconnected.", confirmLabel: "Disconnect Zoho", danger: true, onConfirm: disconnectZohoMailbox })}>Disconnect</button>
+                        : <a className={zohoStatus?.configured ? "" : "disabled"} href={zohoStatus?.configured ? "/api/auth/zoho" : undefined} aria-disabled={!zohoStatus?.configured}>Connect</a>}
+                    </div>
+                  </div>
                   <div><span className="identity-avatar">T</span><div><strong>Tanishka &lt;tanishka@iknowai.in&gt;</strong><small>Sender and Reply-To: {control?.replyTo || "tanishka@iknowai.in"}</small></div><b>Verified</b></div>
                 </div>
               </article>

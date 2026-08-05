@@ -87,7 +87,7 @@ async function canManage(req: NextRequest, userStatus?: Awaited<ReturnType<typeo
   return false;
 }
 
-async function db(path: string, init: RequestInit = {}) {
+async function db<T = Array<Record<string, any>>>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${supabaseUrl()}/rest/v1/${path}`, {
     ...init,
     headers: {
@@ -100,16 +100,16 @@ async function db(path: string, init: RequestInit = {}) {
   });
   if (!response.ok) throw new Error(`Database request failed (${response.status})`);
   const text = await response.text();
-  return text ? JSON.parse(text) : [];
+  return (text ? JSON.parse(text) : []) as T;
 }
 
 // Supabase/PostgREST hard-caps every response at its db-max-rows setting (1000 here)
 // regardless of the requested `limit`, so reading past that requires paging with offset.
-async function fetchAllRows(baseQuery: string, cap = 5000) {
+async function fetchAllRows<T = Array<Record<string, any>>>(baseQuery: string, cap = 5000): Promise<T> {
   const pageSize = 1000;
   const separator = baseQuery.includes("?") ? "&" : "?";
   const firstPage = await db(`${baseQuery}${separator}limit=${pageSize}&offset=0`);
-  if (firstPage.length < pageSize) return firstPage;
+  if (firstPage.length < pageSize) return firstPage as T;
   const remainingPages = Math.max(0, Math.ceil(cap / pageSize) - 1);
   const morePages = await Promise.all(
     Array.from({ length: remainingPages }, (_, i) => db(`${baseQuery}${separator}limit=${pageSize}&offset=${(i + 1) * pageSize}`)),
@@ -119,7 +119,7 @@ async function fetchAllRows(baseQuery: string, cap = 5000) {
     rows.push(...page);
     if (page.length < pageSize) break;
   }
-  return rows;
+  return rows as T;
 }
 
 async function checkContactsDeliverability(contacts: Array<Record<string, any>>) {
@@ -490,7 +490,7 @@ Please let me know a suitable time to connect.`;
       ? `<p>Dear {{name}},</p><p>While reviewing <strong><u>{{company}}</u></strong>, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.</p>`
       : `Dear {{name}},\n\nWhile reviewing {{company}}, I noted its focus on {{research}}. This makes your message especially relevant to {{focus_areas}}.\n\n`
     : "";
-  let body = richTemplate
+  const body = richTemplate
     ? renderRichEmailTemplate(`${personalizedOpening}${template}`, {
         name,
         company: input.company,
@@ -915,7 +915,7 @@ export async function POST(req: NextRequest) {
       let contactsSkipped = 0;
 
       for (const scan of scans) {
-        const emails = [...new Set(
+        const emails: string[] = [...new Set<string>(
           (Array.isArray(scan?.discoveredEmails) ? scan.discoveredEmails : [])
             .map((email: unknown) => String(email || "").trim().toLowerCase())
             .filter((email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)),
@@ -2142,15 +2142,15 @@ async function selectVerifiedSender(value: unknown) {
   return selected;
 }
 
-async function ensureCampaign(campaignName: string, status = "paused_user_hold", campaignSender?: { name: string; email: string }) {
-  let campaigns = await db(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
+async function ensureCampaign(campaignName: string, status = "paused_user_hold", campaignSender?: { name: string; email: string }): Promise<Record<string, any> & { reply_to_email: string }> {
+  let campaigns = await db<Array<Record<string, any>>>(`campaigns?select=*&name=eq.${encodeURIComponent(campaignName)}&limit=1`);
   if (campaigns[0]?.status === "deleted") {
     throw new Error(
       "A deleted campaign already used this name. Choose a new campaign name so its historical statistics stay separate.",
     );
   }
   if (!campaigns.length) {
-    campaigns = await db("campaigns", {
+    campaigns = await db<Array<Record<string, any>>>("campaigns", {
       method: "POST",
       body: JSON.stringify({
         id: crypto.randomUUID(),
@@ -2164,7 +2164,7 @@ async function ensureCampaign(campaignName: string, status = "paused_user_hold",
     (status && campaigns[0].status !== status) ||
     (campaignSender && (campaigns[0].sender_email !== campaignSender.email || campaigns[0].sender_name !== campaignSender.name))
   ) {
-    const updated = await db(`campaigns?id=eq.${campaigns[0].id}`, {
+    const updated = await db<Array<Record<string, any>>>(`campaigns?id=eq.${campaigns[0].id}`, {
       method: "PATCH",
       body: JSON.stringify({
         ...(status ? { status } : {}),
@@ -2283,10 +2283,9 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     0,
     Number(job.total_items || 0) - Number(job.completed_items || 0),
   );
-  // Large imports can start with high-throughput batches, but the final/retry
-  // tail uses smaller batches so one expensive record cannot exhaust the
-  // Cloudflare Worker CPU allowance and stall the whole campaign.
-  const batchLimit = estimatedRemaining > 200 ? 50 : estimatedRemaining > 50 ? 20 : 1;
+  // Keep the tail at the same bounded throughput. The old 1-item tail made
+  // large campaigns appear stuck for hours even when the worker was healthy.
+  const batchLimit = Math.min(50, Math.max(1, estimatedRemaining));
   await queueDb.prepare(`
     UPDATE background_research_items
     SET status = CASE WHEN attempts >= 3 THEN 'failed' ELSE 'queued' END,
@@ -2410,7 +2409,7 @@ async function processBackgroundCampaignBatch(jobId: string, refreshDrafts = fal
     FROM background_research_items
     WHERE job_id = ? AND status IN ('completed', 'quarantined') AND result IS NOT NULL
   `).bind(jobId).all();
-  const outcomeTotals = (completedOutcomes.results || []).reduce((totals, item) => {
+  const outcomeTotals = (completedOutcomes.results || []).reduce<{ drafts: number; contacts: number }>((totals, item) => {
     try {
       const result = JSON.parse(String((item as Record<string, any>).result || "{}"));
       totals.drafts += Number(result.draftsCreated || 0);
@@ -3124,7 +3123,7 @@ function cleanupTemplateText(value: string) {
   return value
     .split("\n")
     .map((line) => {
-      let clean = line
+      const clean = line
         .replace(/\{\{\s*[^{}]{1,80}\s*\}\}|\{\s*[^{}]{1,80}\s*\}/g, "")
         .replace(/[ \t]+/g, " ")
         .replace(/\b(?:with|using|through|about|regarding|around|for)\s+(?=(?:to|and|or)\b|[,.;:!?]|$)/gi, "")
@@ -3244,10 +3243,6 @@ function decodeEntities(value: string) {
 
 function escapeHtml(value: string) {
   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function rewriteStoredGreeting(html: string, name: string) {

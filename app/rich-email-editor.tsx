@@ -46,11 +46,13 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
   const [linkPromptOpen, setLinkPromptOpen] = useState(false);
   const [linkUrlInput, setLinkUrlInput] = useState("");
   const [isPreview, setIsPreview] = useState(false);
+  const [plainText, setPlainText] = useState("");
 
   useEffect(() => {
     if (!editorRef.current || value === lastEmitted.current) return;
     editorRef.current.innerHTML = value;
     lastEmitted.current = value;
+    setPlainText(editorRef.current.innerText || "");
   }, [value]);
 
   // Captures whatever is currently selected inside the editor into
@@ -99,6 +101,7 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
     if (!editorRef.current) return;
     const next = editorRef.current.innerHTML;
     lastEmitted.current = next;
+    setPlainText(editorRef.current.innerText || "");
     onChange(next);
   }
 
@@ -203,7 +206,6 @@ export default function RichEmailEditor({ value, onChange, disabled = false }: R
   }
 
   // Calculate text metrics compact
-  const plainText = editorRef.current ? editorRef.current.innerText || "" : "";
   const wordCount = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
   const tagMatches = (value.match(/\{\{([a-zA-Z0-9_-]+)\}\}/g) || []).length;
 

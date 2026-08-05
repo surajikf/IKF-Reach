@@ -116,8 +116,8 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [preset, setPreset] = useState("7");
-  const [customStart, setCustomStart] = useState(dateInput(new Date(Date.now() - 6 * 86_400_000)));
-  const [customEnd, setCustomEnd] = useState(dateInput(new Date()));
+  const [customStart, setCustomStart] = useState(() => dateInput(new Date(Date.now() - 6 * 86_400_000)));
+  const [customEnd, setCustomEnd] = useState(() => dateInput(new Date()));
   const [campaignId, setCampaignId] = useState("all");
   const [sender, setSender] = useState("all");
   const [campaignStatus, setCampaignStatus] = useState("all");
@@ -132,7 +132,12 @@ export default function StatisticsDashboard({ emails }: { emails: EmailPreview[]
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/statistics?days=90", { cache: "no-store" });
+      const headers = new Headers();
+      if (typeof window !== "undefined") {
+        const key = window.localStorage.getItem("ikf_access_key");
+        if (key) headers.set("x-ikf-access-key", key);
+      }
+      const response = await fetch("/api/statistics?days=90", { cache: "no-store", headers });
       const result = await response.json() as StatisticsPayload;
       if (!response.ok || !result.ok) throw new Error(result.error || "Statistics could not be loaded.");
       setData(result);
