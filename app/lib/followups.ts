@@ -239,13 +239,14 @@ export async function processDueFollowups(limit = 10) {
     }
     const values = { name: recipient.contact_name || "Sir/Madam", company: recipient.company_name || "", topic: "", research: "", focus_areas: "" };
     try {
-      const quotedContent = latestThread?.folderId
-        ? await getZohoMessageContent({ messageId: latestThread.messageId, folderId: latestThread.folderId })
-        : "";
+      if (!latestThread?.folderId) {
+        throw new Error("The latest Zoho message could not be opened, so Spark did not send an incomplete thread reply.");
+      }
+      const quotedContent = await getZohoMessageContent({ messageId: latestThread.messageId, folderId: latestThread.folderId });
       if (!quotedContent) throw new Error("The latest Zoho message content is unavailable, so Spark did not send an incomplete thread reply.");
       const replyBody = replacePersonalizationPlaceholders(stage.html_template, values)
         + quotedTrail({ html: quotedContent, fromAddress: latestThread.fromAddress, date: latestThread.receivedAt || latestThread.sentAt });
-      const result = await replyZohoMessage({ messageId: recipient.zoho_message_id, toAddress: recipient.recipient_email, subject: recipient.original_subject, html: wrapHtml(replyBody) });
+      const result = await replyZohoMessage({ messageId: latestThread.messageId, toAddress: recipient.recipient_email, subject: recipient.original_subject, html: wrapHtml(replyBody) });
       const nextStage = await queue.prepare("SELECT delay_minutes FROM followup_stages WHERE sequence_id=? AND position=?").bind(recipient.sequence_id, nextPosition + 1).first<{ delay_minutes: number }>();
       const nextRun = nextStage ? new Date(Date.now() + Math.max(1, Number(nextStage.delay_minutes || 0)) * 60_000).toISOString() : null;
       await queue.batch([
