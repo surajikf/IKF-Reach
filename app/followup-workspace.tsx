@@ -89,7 +89,7 @@ export default function FollowupWorkspace({ campaign, canManage, zohoConnected, 
 
   async function syncThreads() {
     const result = await action({ action: "sync_threads", campaignId: campaign.id, limit: 50 }, "Zoho thread check completed.");
-    if (result) notify(`${result.matched} original Zoho thread${result.matched === 1 ? "" : "s"} matched in this batch.`);
+    if (result) notify(`${result.matched} of ${result.checked} checked recipient${result.checked === 1 ? "" : "s"} matched an original Zoho message.`);
   }
 
   async function createSequence() {
@@ -111,6 +111,7 @@ export default function FollowupWorkspace({ campaign, canManage, zohoConnected, 
         <p className="eyebrow">Zoho threaded follow-up</p>
         <h2>Create a follow-up in the original email trail</h2>
         <p>Spark uses only confirmed delivered recipients and requires a saved Zoho message ID before a reply can enter the original thread.</p>
+        <p className="section-helper">Only original messages available in the connected Zoho mailbox can become native thread replies. Brevo-only originals stay safely excluded.</p>
       </div>
       <div className={`followup-connection ${zohoConnected ? "connected" : "missing"}`}>
         <strong>{zohoConnected ? "Zoho Mail connected" : "Zoho Mail needs attention"}</strong>

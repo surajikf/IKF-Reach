@@ -361,7 +361,7 @@ export default function Home() {
   const [queueForm, setQueueForm] = useState({ campaignId: "", scheduledFor: "", batchSize: 1, delayMinutes: 5, confirmed: false });
   const [batchSizeCustom, setBatchSizeCustom] = useState(false);
   const [delayMinutesCustom, setDelayMinutesCustom] = useState(false);
-  const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send">("schedule");
+  const [campaignDeliveryChoice, setCampaignDeliveryChoice] = useState<"schedule" | "send" | "zoho">("schedule");
   const [campaignSendConfirm, setCampaignSendConfirm] = useState("");
   const [sendCampaignProgress, setSendCampaignProgress] = useState<{ sent: number; total: number; failed: number } | null>(null);
   const [sendCampaignWaitNote, setSendCampaignWaitNote] = useState<string | null>(null);
@@ -1356,6 +1356,56 @@ export default function Home() {
     }
   }
 
+  async function startSelectedCampaignZohoThreads() {
+    if (!selectedCampaign) return;
+    sendCampaignCancelRef.current = false;
+    setWorking(true);
+    setNotice("");
+    setSendCampaignWaitNote(null);
+    setSendCampaignProgress({ sent: 0, total: 0, failed: 0 });
+    let totalSent = 0;
+    let totalFailed = 0;
+    let totalWarnings = 0;
+    let totalSkipped = 0;
+    let skippedDetails: Array<{ email: string; reason: string }> = [];
+    let campaignTotal: number | null = null;
+    let networkPaused = false;
+    try {
+      while (!sendCampaignCancelRef.current) {
+        let result: any;
+        try {
+          result = await fetchSendCampaignBatchWithRetry({
+            action: "send_zoho_campaign",
+            campaignId: selectedCampaign.id,
+            confirmText: campaignSendConfirm,
+            batchLimit: 10,
+          });
+        } catch {
+          networkPaused = true;
+          break;
+        }
+        if (campaignTotal === null) campaignTotal = Math.max(0, (result.totalApproved || 0) - (result.skipped || 0));
+        totalSent += result.sent || 0;
+        totalFailed += result.failed || 0;
+        totalWarnings += result.warnings?.length || 0;
+        totalSkipped = result.skipped ?? totalSkipped;
+        skippedDetails = result.skippedDetails || skippedDetails;
+        setSendCampaignProgress({ sent: totalSent + totalFailed, total: campaignTotal, failed: totalFailed });
+        await loadControl();
+        if (!result.remaining) break;
+      }
+      setCampaignSendConfirm("");
+      const stoppedEarly = sendCampaignCancelRef.current;
+      const label = networkPaused ? "Paused after a network issue." : stoppedEarly ? "Stopped early." : "Done.";
+      setNoticeTone(totalFailed || totalWarnings || networkPaused ? "error" : "success");
+      setNotice(`${label} ${totalSent} initial campaign email${totalSent === 1 ? "" : "s"} sent through Zoho and connected to ${totalSent === 1 ? "its" : "their"} native email thread${totalSent === 1 ? "" : "s"}${totalFailed ? `; ${totalFailed} need attention` : ""}${totalWarnings ? `; ${totalWarnings} were sent but their thread anchors need attention before follow-up` : ""}${totalSkipped ? `; ${totalSkipped} quarantined and skipped (${skippedDetails.slice(0, 2).map((d) => d.email).join(", ")}${skippedDetails.length > 2 ? "…" : ""})` : ""}.${networkPaused ? ' Click "Start Zoho threads" again to resume — messages already sent will not be repeated.' : ""}`);
+    } finally {
+      setWorking(false);
+      setSendCampaignProgress(null);
+      setSendCampaignWaitNote(null);
+    }
+  }
+
   function stopWebsiteDiscovery() {
     scanCancelRef.current = true;
   }
@@ -2278,10 +2328,11 @@ export default function Home() {
                         <div className="campaign-approval-box"><div><b>{selectedCampaignDrafts}</b><span>drafts still need approval</span>{selectedCampaignQuarantined > 0 && <small>{selectedCampaignQuarantined} more {selectedCampaignQuarantined === 1 ? "is" : "are"} permanently quarantined (invalid email) — excluded from this count and skipped automatically at delivery.</small>}</div><button disabled={working || !control?.canManage || selectedCampaignDrafts === 0} onClick={approveSelectedCampaign}>{selectedCampaignDrafts ? `Approve ${selectedCampaignDrafts} drafts` : "Campaign approved"}</button></div>
                       </section>
                       <section className="campaign-schedule-section">
-                        <div className="campaign-step-heading"><span>3</span><div><strong>Choose campaign delivery</strong><p>Sending identity: {selectedCampaign.senderName} &lt;{selectedCampaign.senderEmail}&gt;. Choose immediate or scheduled Brevo delivery.</p></div></div>
+                        <div className="campaign-step-heading"><span>3</span><div><strong>Choose campaign delivery</strong><p>Sending identity: {selectedCampaign.senderName} &lt;{selectedCampaign.senderEmail}&gt;. Use Brevo for standard delivery, or Zoho when this campaign needs native trail-mail follow-ups.</p></div></div>
                         <div className="campaign-delivery-choice" role="tablist" aria-label="Campaign delivery choice">
-                          <button className={campaignDeliveryChoice === "schedule" ? "active" : ""} onClick={() => setCampaignDeliveryChoice("schedule")}>Schedule campaign</button>
-                          <button className={campaignDeliveryChoice === "send" ? "active" : ""} onClick={() => setCampaignDeliveryChoice("send")}>Send campaign now</button>
+                          <button className={campaignDeliveryChoice === "schedule" ? "active" : ""} onClick={() => { setCampaignDeliveryChoice("schedule"); setCampaignSendConfirm(""); }}>Schedule with Brevo</button>
+                          <button className={campaignDeliveryChoice === "send" ? "active" : ""} onClick={() => { setCampaignDeliveryChoice("send"); setCampaignSendConfirm(""); }}>Send with Brevo now</button>
+                          <button className={campaignDeliveryChoice === "zoho" ? "active" : ""} onClick={() => { setCampaignDeliveryChoice("zoho"); setCampaignSendConfirm(""); }}>Start Zoho threads</button>
                         </div>
                         {campaignDeliveryChoice === "schedule" ? (
                           <div className="campaign-schedule-form">
@@ -2340,6 +2391,28 @@ export default function Home() {
                             )}
                             <label className="campaign-confirm"><input type="checkbox" disabled={paused || !control?.canManage} checked={queueForm.confirmed} onChange={(event) => setQueueForm({ ...queueForm, confirmed: event.target.checked })} /><span><strong>I reviewed this campaign and approve automatic delivery.</strong><small>{paused ? "Pause all is active. Turn it off in Controls & APIs before scheduling." : "Brevo will continue delivery after the dashboard is closed."}</small></span></label>
                             <button className="primary-action campaign-schedule-button" disabled={working || paused || !control?.canManage || !queueForm.confirmed || !queueForm.scheduledFor || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0} onClick={scheduleSelectedCampaign}>{working ? "Scheduling campaign…" : `Schedule ${selectedCampaignApproved} approved emails`}</button>
+                          </div>
+                        ) : campaignDeliveryChoice === "zoho" ? (
+                          <div className="campaign-send-now-form">
+                            <div>
+                              <strong>Start a native Zoho conversation for every recipient</strong>
+                              <p>Each approved first-touch email is sent from the connected Zoho mailbox. Spark saves its Zoho message ID as an immutable thread anchor, so later drip stages can reply inside the same email trail. This cannot be added retroactively to messages sent through Brevo.</p>
+                              {!zohoStatus?.connected && <p className="campaign-schedule-preview-error">Connect Zoho Mail in Controls &amp; APIs before starting these threads.</p>}
+                            </div>
+                            <label><span>Type START ZOHO THREADS to confirm</span><input value={campaignSendConfirm} onChange={(event) => setCampaignSendConfirm(event.target.value.toUpperCase())} placeholder="START ZOHO THREADS" /></label>
+                            {working && sendCampaignProgress ? (
+                              <div className="scan-progress" role="status" aria-live="polite">
+                                <div className="scan-progress-row">
+                                  <span>Starting Zoho threadsâ€¦ {sendCampaignProgress.sent} of {sendCampaignProgress.total || "?"}{sendCampaignProgress.failed ? ` (${sendCampaignProgress.failed} failed)` : ""}</span>
+                                  <button type="button" className="scan-stop-button" onClick={stopSendCampaignNow}>Stop</button>
+                                </div>
+                                <i><b style={{ width: `${sendCampaignProgress.total ? Math.min(100, Math.round((sendCampaignProgress.sent / sendCampaignProgress.total) * 100)) : 0}%` }} /></i>
+                                {sendCampaignWaitNote && <small className="scan-progress-note scan-progress-warn">{sendCampaignWaitNote}</small>}
+                                <small className="scan-progress-note">Safe to stop and resume. Messages already accepted by Zoho are marked sent before the next batch and will not be repeated.</small>
+                              </div>
+                            ) : (
+                              <button className="danger-action" disabled={working || paused || !control?.canManage || !zohoStatus?.connected || selectedCampaignApproved === 0 || selectedCampaignDrafts > 0 || campaignSendConfirm !== "START ZOHO THREADS"} onClick={startSelectedCampaignZohoThreads}>{working ? "Startingâ€¦" : `Start ${selectedCampaignApproved} Zoho email threads`}</button>
+                            )}
                           </div>
                         ) : (
                           <div className="campaign-send-now-form">

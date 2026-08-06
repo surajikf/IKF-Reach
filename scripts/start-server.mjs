@@ -34,6 +34,7 @@ loadEnvFile(resolve(process.cwd(), ".env.production"));
 loadEnvFile(resolve(process.cwd(), ".env.local"));
 
 const CRON_INTERVAL_MS = 60_000;
+const BACKGROUND_CAMPAIGN_INTERVAL_MS = 15_000;
 
 async function tickScheduledValidation(port) {
   const base = `http://127.0.0.1:${port}`;
@@ -70,8 +71,34 @@ async function tickScheduledFollowups(port) {
   }
 }
 
+let backgroundCampaignTickInFlight = false;
+async function tickBackgroundCampaigns(port) {
+  if (backgroundCampaignTickInFlight) return;
+  backgroundCampaignTickInFlight = true;
+  try {
+    const token = process.env.SUPABASE_SECRET_KEY || "";
+    const headers = token ? { "x-ikf-background-token": token } : {};
+    const response = await fetch(`http://127.0.0.1:${port}/api/background-campaign`, { headers });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const jobIds = Array.isArray(payload?.jobIds) ? payload.jobIds : [];
+    await Promise.all(jobIds.map((jobId) => fetch(`http://127.0.0.1:${port}/api/background-campaign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers, "x-ikf-background-job": jobId },
+      body: JSON.stringify({ jobId, refreshDrafts: false }),
+    }).catch(() => null)));
+  } catch {
+    // The next heartbeat retries unfinished jobs. Avoid stopping the server for
+    // a temporary database or network failure.
+  } finally {
+    backgroundCampaignTickInFlight = false;
+  }
+}
+
 const { port } = await startProdServer();
 console.log(`[ikf-spark] production server listening on port ${port}`);
 
 setInterval(() => { tickScheduledValidation(port); tickScheduledFollowups(port); }, CRON_INTERVAL_MS);
+setInterval(() => { tickBackgroundCampaigns(port); }, BACKGROUND_CAMPAIGN_INTERVAL_MS);
+setTimeout(() => { tickBackgroundCampaigns(port); }, 2_000);
 tickScheduledFollowups(port);

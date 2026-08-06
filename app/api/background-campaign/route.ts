@@ -30,6 +30,32 @@ async function canRunWorker(req: NextRequest, jobId: string) {
   return user?.status === "approved";
 }
 
+async function canInspectWorker(req: NextRequest) {
+  const secret = process.env.SUPABASE_SECRET_KEY || "";
+  const suppliedToken = req.headers.get("x-ikf-background-token") || "";
+  if (secret && suppliedToken === secret) return true;
+  if (isLocalRequest(req) || allowedOperators.has(actor(req))) return true;
+  const accessKey = process.env.IKF_ACCESS_KEY || process.env.NEXT_PUBLIC_TEAM_ACCESS_KEY || "";
+  if (accessKey && req.headers.get("x-ikf-access-key") === accessKey) return true;
+  const email = verifyEmailCookie(req.cookies.get("ikf_auth")?.value)?.toLowerCase();
+  if (!email) return false;
+  if (email === "suraj.sonnar@ikf.co.in") return true;
+  const user = await getQueueDb().prepare("SELECT status FROM app_users WHERE email = ?").bind(email).first<{ status: string }>();
+  return user?.status === "approved";
+}
+
+// The production server polls this endpoint so queued/researching jobs resume
+// even when a browser is closed or a previous self-fetch was interrupted.
+export async function GET(req: NextRequest) {
+  if (!(await canInspectWorker(req))) {
+    return NextResponse.json({ ok: false, error: "Unauthorized background campaign request." }, { status: 403 });
+  }
+  const jobs = await getQueueDb().prepare(
+    "SELECT id FROM background_campaign_jobs WHERE status IN ('queued','researching') ORDER BY updated_at ASC LIMIT 25",
+  ).all<{ id: string }>();
+  return NextResponse.json({ ok: true, jobIds: jobs.results.map((job) => job.id) });
+}
+
 async function runBackgroundCampaignBatch(
   requestUrl: string,
   jobId: string,

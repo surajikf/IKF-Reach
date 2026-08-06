@@ -398,20 +398,28 @@ export async function findZohoThreadAnchor(input: {
     searchZohoMessages(`from:${email}`, 30).catch(() => []),
     searchZohoMessages(`to:${email}`, 30).catch(() => []),
   ]);
-  const candidates = searches.flat().filter((message) => {
-    if (!expectedSubject) return true;
+  const uniqueCandidates = new Map<string, ZohoMessageSummary>();
+  for (const message of searches.flat()) {
     const actual = normalizedSubject(message.subject);
-    return actual === expectedSubject || actual.includes(expectedSubject) || expectedSubject.includes(actual);
-  });
-  candidates.sort((a, b) => {
-    const aInbound = a.fromAddress.includes(email) ? 1 : 0;
-    const bInbound = b.fromAddress.includes(email) ? 1 : 0;
-    if (aInbound !== bInbound) return bInbound - aInbound;
-    return new Date(b.receivedAt || b.sentAt || 0).getTime() - new Date(a.receivedAt || a.sentAt || 0).getTime();
-  });
+    const subjectMatches = !expectedSubject
+      || actual === expectedSubject
+      || actual.includes(expectedSubject)
+      || expectedSubject.includes(actual);
+    if (subjectMatches) uniqueCandidates.set(message.messageId, message);
+  }
+  const candidates = [...uniqueCandidates.values()];
+  const replied = candidates.some((message) => message.fromAddress.includes(email));
+  candidates.sort((a, b) => (
+    new Date(b.receivedAt || b.sentAt || 0).getTime()
+    - new Date(a.receivedAt || a.sentAt || 0).getTime()
+  ));
   const match = candidates[0];
   if (!match) return null;
-  return { ...match, replied: match.fromAddress.includes(email) };
+  return {
+    ...match,
+    direction: match.fromAddress.includes(email) ? "inbound" as const : "outbound" as const,
+    replied,
+  };
 }
 
 export async function sendZohoMessage(input: {

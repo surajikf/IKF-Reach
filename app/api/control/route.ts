@@ -28,6 +28,8 @@ import {
   type EmailDomainSignals,
   type EmailHistorySignals,
 } from "../../lib/email-validation";
+import { sendZohoMessage } from "../../lib/zoho";
+import { saveZohoThread } from "../../lib/followups";
 
 export const dynamic = "force-dynamic";
 
@@ -1971,6 +1973,95 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, count: sent.length, skipped: skippedCount, skippedDetails: blockedDetails });
     }
 
+    if (body.action === "send_zoho_campaign") {
+      const campaignId = String(body.campaignId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
+      if (body.confirmText !== "START ZOHO THREADS") return NextResponse.json({ ok: false, error: "Type START ZOHO THREADS to confirm Zoho delivery." }, { status: 400 });
+      // Keep Zoho batches deliberately smaller than Brevo batches. Every accepted message is
+      // persisted as a sent email before the next batch, making this operation safely resumable.
+      const batchLimit = Math.max(1, Math.min(20, Math.trunc(Number(body.batchLimit)) || 10));
+      const [settingsRows, campaignRows, allMails] = await Promise.all([
+        db("outreach_settings?select=*&key=eq.sending_policy"),
+        db(`campaigns?select=*&id=eq.${encodeURIComponent(campaignId)}&limit=1`),
+        fetchAllRows(`generated_emails?select=*&campaign_id=eq.${encodeURIComponent(campaignId)}&status=eq.approved&order=generated_at.asc`, 10000),
+      ]);
+      const policy = settingsRows[0]?.value || {};
+      if (policy.paused) return NextResponse.json({ ok: false, error: "Sending is paused. Turn off Pause all before starting Zoho threads." }, { status: 409 });
+      if (!campaignRows[0]) return NextResponse.json({ ok: false, error: "Campaign not found." }, { status: 404 });
+      if (!allMails.length) return NextResponse.json({ ok: true, provider: "zoho", sent: 0, failed: 0, failures: [], warnings: [], skipped: 0, skippedDetails: [], remaining: 0, totalApproved: 0 });
+
+      const allContactIds = [...new Set(allMails.map((mail: Record<string, any>) => mail.contact_id).filter(Boolean))];
+      const allContacts: Array<Record<string, any>> = [];
+      for (const idGroup of chunk(allContactIds, 80)) {
+        allContacts.push(...await db(`contacts?select=*&id=in.(${idGroup.join(",")})`));
+      }
+      const contactById = new Map(allContacts.map((item: Record<string, any>) => [item.id, item]));
+      const { blockedContactIds, blockedDetails } = await filterDeliverableContacts(allContacts);
+      const deliverableMails = allMails.filter((mail: Record<string, any>) => !blockedContactIds.has(String(mail.contact_id)));
+      const skippedCount = allMails.length - deliverableMails.length;
+      if (!deliverableMails.length) {
+        return NextResponse.json({ ok: false, error: `All ${allMails.length} approved email${allMails.length === 1 ? "" : "s"} in this campaign are unvalidated or quarantined and were skipped: ${blockedDetails.slice(0, 4).map((b) => `${b.email} (${b.reason})`).join("; ")}${blockedDetails.length > 4 ? "; and more" : ""}.` }, { status: 400 });
+      }
+
+      const batch = deliverableMails.slice(0, batchLimit);
+      const sent: string[] = [];
+      const failures: Array<{ id: string; error: string }> = [];
+      const warnings: Array<{ id: string; error: string }> = [];
+      let cursor = 0;
+      async function sendZohoWorker() {
+        while (cursor < batch.length) {
+          const mail = batch[cursor++];
+          const contact = contactById.get(mail.contact_id);
+          if (!contact?.email) {
+            failures.push({ id: mail.id, error: "Recipient email is missing." });
+            continue;
+          }
+          try {
+            const usedSender = await senderForMail(mail);
+            const result = await submitZoho(mail, contact, req.nextUrl.origin);
+            if (!result.messageId) throw new Error("Zoho accepted the request without returning a message ID.");
+            const sendId = crypto.randomUUID();
+            const sentAt = new Date().toISOString();
+            await db("email_sends", { method: "POST", body: JSON.stringify({ id: sendId, generated_email_id: mail.id, company_id: mail.company_id, contact_id: mail.contact_id, campaign_id: mail.campaign_id, sender_name: usedSender.name, sender_email: usedSender.email, recipient_email: contact.email, subject: mail.subject, brevo_message_id: result.messageId, status: "sent", sent_at: sentAt }) });
+            // Mark sent before recording the thread anchor. If the anchor write fails after Zoho has
+            // accepted the email, a retry must not send the same initial message a second time.
+            await db(`generated_emails?id=eq.${mail.id}`, { method: "PATCH", body: JSON.stringify({ status: "sent" }) });
+            sent.push(mail.id);
+            try {
+              await saveZohoThread({
+                campaignId,
+                generatedEmailId: mail.id,
+                emailSendId: sendId,
+                recipientEmail: contact.email,
+                subject: mail.subject,
+                messageId: result.messageId,
+                direction: "outbound",
+                replied: false,
+                sentAt,
+              });
+            } catch (error) {
+              warnings.push({ id: mail.id, error: error instanceof Error ? `Message sent, but its Zoho thread anchor could not be saved: ${error.message}` : "Message sent, but its Zoho thread anchor could not be saved." });
+            }
+          } catch (error) {
+            failures.push({ id: mail.id, error: error instanceof Error ? error.message : "Zoho rejected this email." });
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(2, batch.length) }, () => sendZohoWorker()));
+      return NextResponse.json({
+        ok: true,
+        provider: "zoho",
+        sent: sent.length,
+        failed: failures.length,
+        failures,
+        warnings,
+        skipped: skippedCount,
+        skippedDetails: blockedDetails,
+        remaining: deliverableMails.length - batch.length,
+        totalApproved: allMails.length,
+      });
+    }
+
     if (body.action === "send_campaign") {
       const campaignId = String(body.campaignId || "");
       if (!/^[0-9a-f-]{36}$/i.test(campaignId)) return NextResponse.json({ ok: false, error: "Choose a valid campaign." }, { status: 400 });
@@ -3320,6 +3411,22 @@ async function submitBrevo(mail: Record<string, any>, contact: Record<string, an
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Brevo rejected the email request.");
   return result;
+}
+
+async function submitZoho(mail: Record<string, any>, contact: Record<string, any>, baseUrl?: string) {
+  const inferredName = inferContactName(contact.email, contact.full_name);
+  let htmlContent = personalizeStoredGreeting(cleanupUnresolvedHtml(mail.html_body), inferredName);
+  if (baseUrl && contact.id && contact.email) {
+    const unsubscribeUrl = `${baseUrl}/api/unsubscribe?contact=${encodeURIComponent(String(contact.id))}&email=${encodeURIComponent(String(contact.email))}`;
+    htmlContent += `<p style="font-family:Calibri,Arial,sans-serif;font-size:9pt;color:#8993a0;margin-top:24px">Don't want to hear from us again? <a href="${unsubscribeUrl}" style="color:#8993a0">Unsubscribe</a>.</p>`;
+  }
+  const campaignSender = await senderForMail(mail);
+  return sendZohoMessage({
+    toAddress: contact.email,
+    subject: mail.subject,
+    html: htmlContent,
+    fromAddress: campaignSender.email,
+  });
 }
 
 async function submitTestBrevo(mail: Record<string, any>, testRecipient: string, originalRecipient: string, originalContactId?: string, baseUrl?: string) {

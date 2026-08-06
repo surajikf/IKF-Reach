@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getQueueDb } from "../../db";
-import { findZohoThreadAnchor, getZohoMessageContent, replyZohoMessage } from "./zoho";
+import { findZohoThreadAnchor, replyZohoMessage } from "./zoho";
 import { replacePersonalizationPlaceholders } from "./personalization";
 
 const FOLLOWUP_SCHEMA = `
@@ -99,7 +99,11 @@ export async function createFollowupSequence(input: { campaignId: string; name: 
     if (!email) continue;
     const thread = threadByEmail.get(email);
     let exclusion: string | null = null;
-    if (!delivered.has(email)) exclusion = "not_confirmed_delivered";
+    // A Zoho thread saved by Spark is also authoritative proof that the
+    // original message was accepted. Zoho delivery events are not mirrored
+    // into Brevo analytics, so requiring a Brevo `delivered` event here would
+    // incorrectly exclude every Zoho-first campaign from follow-ups.
+    if (!delivered.has(email) && !thread?.zoho_message_id) exclusion = "not_confirmed_delivered";
     if (harmful.has(email)) exclusion = harmful.get(email) || "suppressed";
     if (row.contact?.unsubscribed) exclusion = "unsubscribed";
     if (input.excludeReplied && Number(thread?.replied || 0)) exclusion = "already_replied";
@@ -126,7 +130,7 @@ export async function syncCampaignThreads(campaignId: string, limit = 25) {
     const recipientEmail = String(row.contact.email).toLowerCase();
     const match = await findZohoThreadAnchor({ recipientEmail, subject: row.subject });
     if (!match) continue;
-    await saveZohoThread({ campaignId, generatedEmailId: row.id, recipientEmail, subject: row.subject, messageId: match.messageId, threadId: match.threadId, direction: match.replied ? "inbound" : "outbound", replied: match.replied, sentAt: match.sentAt || match.receivedAt });
+    await saveZohoThread({ campaignId, generatedEmailId: row.id, recipientEmail, subject: row.subject, messageId: match.messageId, threadId: match.threadId, direction: match.direction, replied: match.replied, sentAt: match.sentAt || match.receivedAt });
     matched += 1;
   }
   return { checked: pending.length, matched, remaining: Math.max(0, rows.length - seen.size - pending.length) };
@@ -172,35 +176,6 @@ export async function stopFollowup(sequenceId: string) {
 
 function wrapHtml(html: string) { return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5">${html}</div>`; }
 
-function escapeQuoteText(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function quotedSenderName(email: string) {
-  const local = email.split("@")[0] || email;
-  return local.split(/[._-]+/).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ") || email;
-}
-
-function safeQuotedHtml(value: string) {
-  return String(value || "")
-    .replace(/<\/?(?:html|head|body)[^>]*>/gi, "")
-    .replace(/<(?:script|style|iframe|object|embed|form|link|meta)[\s\S]*?>[\s\S]*?<\/(?:script|style|iframe|object|embed|form)>/gi, "")
-    .replace(/<(?:script|style|iframe|object|embed|form|link|meta|img)\b[^>]*\/?\s*>/gi, "")
-    .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-    .replace(/(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/gi, 'href="#"');
-}
-
-function quotedTrail(input: { html: string; fromAddress: string; date?: string | null }) {
-  const date = input.date ? new Date(input.date) : new Date();
-  const readableDate = new Intl.DateTimeFormat("en-US", {
-    weekday: "short", year: "numeric", month: "short", day: "numeric",
-    hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata",
-  }).format(Number.isNaN(date.getTime()) ? new Date() : date);
-  const email = input.fromAddress.trim().toLowerCase();
-  const sender = quotedSenderName(email);
-  return `<div class="ikf-quoted-reply" style="margin-top:24px;color:#222"><div style="margin-bottom:8px">On ${escapeQuoteText(readableDate)}, ${escapeQuoteText(sender)} &lt;<a href="mailto:${escapeQuoteText(email)}">${escapeQuoteText(email)}</a>&gt; wrote:</div><blockquote style="margin:0 0 0 4px;padding-left:12px;border-left:1px solid #b8b8b8">${safeQuotedHtml(input.html)}</blockquote></div>`;
-}
-
 export async function processDueFollowups(limit = 10) {
   await ensureFollowupSchema();
   const queue = getQueueDb();
@@ -221,7 +196,7 @@ export async function processDueFollowups(limit = 10) {
     const latestThread = await findZohoThreadAnchor({ recipientEmail: recipient.recipient_email, subject: recipient.original_subject });
     if (latestThread) {
       recipient.zoho_message_id = latestThread.messageId;
-      await saveZohoThread({ campaignId: recipient.campaign_id, generatedEmailId: recipient.generated_email_id, recipientEmail: recipient.recipient_email, subject: recipient.original_subject, messageId: latestThread.messageId, threadId: latestThread.threadId, direction: latestThread.replied ? "inbound" : "outbound", replied: latestThread.replied, sentAt: latestThread.receivedAt || latestThread.sentAt });
+      await saveZohoThread({ campaignId: recipient.campaign_id, generatedEmailId: recipient.generated_email_id, recipientEmail: recipient.recipient_email, subject: recipient.original_subject, messageId: latestThread.messageId, threadId: latestThread.threadId, direction: latestThread.direction, replied: latestThread.replied, sentAt: latestThread.receivedAt || latestThread.sentAt });
       if (recipient.exclude_replied && latestThread.replied) {
         await queue.batch([
           queue.prepare("UPDATE followup_recipients SET status='replied',replied=1,exclusion_reason='already_replied',next_run_at=NULL,zoho_message_id=?,updated_at=? WHERE id=?").bind(latestThread.messageId, now, recipient.id),
@@ -239,13 +214,12 @@ export async function processDueFollowups(limit = 10) {
     }
     const values = { name: recipient.contact_name || "Sir/Madam", company: recipient.company_name || "", topic: "", research: "", focus_areas: "" };
     try {
-      if (!latestThread?.folderId) {
-        throw new Error("The latest Zoho message could not be opened, so Spark did not send an incomplete thread reply.");
+      if (!latestThread?.messageId) {
+        throw new Error("The latest Zoho message is unavailable, so Spark did not send an incomplete thread reply.");
       }
-      const quotedContent = await getZohoMessageContent({ messageId: latestThread.messageId, folderId: latestThread.folderId });
-      if (!quotedContent) throw new Error("The latest Zoho message content is unavailable, so Spark did not send an incomplete thread reply.");
-      const replyBody = replacePersonalizationPlaceholders(stage.html_template, values)
-        + quotedTrail({ html: quotedContent, fromAddress: latestThread.fromAddress, date: latestThread.receivedAt || latestThread.sentAt });
+      // Zoho's native reply action appends the quoted conversation. Adding it here
+      // would duplicate the original message and produce a malformed trail in Gmail.
+      const replyBody = replacePersonalizationPlaceholders(stage.html_template, values);
       const result = await replyZohoMessage({ messageId: latestThread.messageId, toAddress: recipient.recipient_email, subject: recipient.original_subject, html: wrapHtml(replyBody) });
       const nextStage = await queue.prepare("SELECT delay_minutes FROM followup_stages WHERE sequence_id=? AND position=?").bind(recipient.sequence_id, nextPosition + 1).first<{ delay_minutes: number }>();
       const nextRun = nextStage ? new Date(Date.now() + Math.max(1, Number(nextStage.delay_minutes || 0)) * 60_000).toISOString() : null;
